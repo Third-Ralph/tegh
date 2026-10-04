@@ -9,11 +9,14 @@ functions, so they live in a module a test imports by name.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
 
-from tegh.cli import _parse_args, main, wrap_command
+from tegh import configvalues, interpose
+from tegh.cli import _parse_args, main, unwrap_command, wrap_command
+from tegh.harnesses import claude_code
 from tegh.store import TeghStore
 
 REPO = Path(__file__).resolve().parents[2]
@@ -149,3 +152,140 @@ def wrap_answering(harness: dict, prompt) -> int:
 
 def store_of(harness: dict) -> TeghStore:
     return TeghStore(home=harness["tegh_home"])
+
+
+# ---------------------------------------------------------------------------
+# What the unwrap tests share
+# ---------------------------------------------------------------------------
+
+#: The credential the `wrapped` fixture relocates. Obviously not one.
+LEDGER_SECRET = "not-a-real-credential-ledger-fixture"
+LEDGER_FIELD = "LEDGER_API_KEY"
+
+
+def files_holding(root: Path, value: str) -> list[Path]:
+    """Every file under `root` whose bytes contain `value`."""
+    needle = value.encode("utf-8")
+    return [
+        path
+        for path in sorted(root.rglob("*"))
+        if path.is_file() and needle in path.read_bytes()
+    ]
+
+
+def fingerprint(root: Path) -> dict[str, str]:
+    """Every file under `root`, by content. Equal means nothing changed."""
+    return {
+        str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
+def unwrap_cli(state: dict, *flags: str, prompt=None) -> int:
+    """`tegh unwrap` for the project in `state`, in process, through the CLI seam."""
+    return unwrap_command(
+        _parse_args(["unwrap", *flags, "--project", str(state["project"])]),
+        prompt=prompt,
+    )
+
+
+def site_files(tmp_path: Path, *, local, project_scope, user) -> tuple[Path, Path, Path]:
+    """A harness home and project holding the given `mcpServers` blocks.
+
+    `None` means the scope has no block at all, which is the usual state of two
+    of the three.
+    """
+    project = tmp_path / "widget"
+    project.mkdir()
+    document: dict = {"projects": {str(project): {"lastSessionId": "abc"}}}
+    if local is not None:
+        document["projects"][str(project)]["mcpServers"] = local
+    if user is not None:
+        document["mcpServers"] = user
+    claude_json = tmp_path / ".claude.json"
+    claude_json.write_text(json.dumps(document, indent=2, ensure_ascii=False), encoding="utf-8")
+    project_mcp = project / ".mcp.json"
+    if project_scope is not None:
+        project_mcp.write_text(
+            json.dumps({"mcpServers": project_scope}, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    return project, claude_json, project_mcp
+
+
+def interposed(
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    local=None,
+    project_scope=None,
+    user=None,
+    config_mode: int | None = None,
+) -> dict:
+    """The state a wrap leaves behind, reached without the admission ceremony.
+
+    An unwrap reads three things: the backup, the credential map and the sites.
+    This writes all three with the calls `tegh wrap` itself makes, in its order
+    (`cli._classify_config_values` then `cli._interpose`), and treats EVERY
+    literal `env` value as a credential the human relocated. What it skips is
+    the snapshot, the review and the grants, none of which an unwrap consults,
+    so a case that needs three scopes and four credentials costs milliseconds
+    and no MCP server. `test_unwrap.py`'s `wrapped` fixture is the real wrap.
+
+    `config_mode` sets the permission bits of each config file BEFORE the wrap
+    touches it. Returns the paths, the store, each config's pre-wrap bytes
+    (`None` for a file that did not exist) and the relocated values.
+    """
+    project, claude_json, project_mcp = site_files(
+        tmp_path, local=local, project_scope=project_scope, user=user
+    )
+    if config_mode is not None:
+        for config in (claude_json, project_mcp):
+            if config.exists():
+                config.chmod(config_mode)
+    originals = {
+        path: path.read_bytes() if path.exists() else None
+        for path in (claude_json, project_mcp)
+    }
+    tegh_home = tmp_path / "tegh"
+    monkeypatch.setenv("TEGH_HOME", str(tegh_home))
+    store = TeghStore(home=tegh_home)
+    sites, gateway_site = claude_code.config_sites(
+        project, claude_json_path=claude_json, project_mcp_path=project_mcp
+    )
+
+    relocated: dict[str, str] = {}
+    cleared: dict[str, str] = {}
+    secrets: list[str] = []
+    for site in sites:
+        block = interpose.read_block(site)
+        for found in configvalues.inventory(block, scope=site.scope.value):
+            relocated[found.coordinate] = found.server_id
+            cleared[found.coordinate] = found.value_sha256
+        for server_id, entry in block.items():
+            values = {k: v for k, v in entry.get("env", {}).items() if isinstance(v, str)}
+            if values:
+                store.write_secret_leaf(project, server_id, values)
+                secrets.extend(values.values())
+
+    backup = interpose.apply_interposition(
+        interpose.plan_interposition(
+            sites=sites,
+            gateway_site=gateway_site,
+            gateway_entry={"command": "tegh", "args": ["gateway"]},
+            cleared_config=cleared,
+        ),
+        wrapped_at="2026-10-04T00:00:00+00:00",
+        project=project,
+        harness="claude-code",
+        relocated=relocated,
+    )
+    backup_path = store.backup_path(project)
+    backup_path.parent.mkdir(parents=True, exist_ok=True)
+    backup_path.write_text(backup.to_json(), encoding="utf-8")
+    return {
+        "root": tmp_path, "project": project, "claude_json": claude_json,
+        "project_mcp": project_mcp, "store": store, "originals": originals,
+        "secrets": secrets, "tegh_home": tegh_home,
+    }

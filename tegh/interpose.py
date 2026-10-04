@@ -63,7 +63,9 @@ record.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+import os
+import stat
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
 
@@ -92,8 +94,41 @@ class BackupMissing(InterposeError):
     """Unwrap was asked to restore from a backup that is absent or unreadable."""
 
 
+class BackupUnreadable(InterposeError):
+    """The wrap backup is not JSON, or not the shape tegh writes."""
+
+
 class RestoreUnverified(InterposeError):
     """A restore was written and the site does not hold it when read back."""
+
+
+class RestoreCollision(InterposeError):
+    """A server added since the wrap has the name of one the unwrap restores."""
+
+
+class ConfigChangedSincePlan(InterposeError):
+    """A site holds different added entries than the plan a person agreed to."""
+
+
+class CredentialNotStored(InterposeError):
+    """How a `resolve` callback says the store has no value for a reference."""
+
+
+class CredentialUnavailable(InterposeError):
+    """A relocated credential is in neither the store nor the site it left.
+
+    Carries coordinates for the caller's message, and never a value.
+    """
+
+    def __init__(self, site_label: str, server_id: str, block: str, field_name: str):
+        super().__init__(
+            f"credential {server_id} {block}.{field_name} is neither in tegh's "
+            f"store nor in {site_label}"
+        )
+        self.site_label = site_label
+        self.server_id = server_id
+        self.block = block
+        self.field_name = field_name
 
 
 @dataclass(frozen=True)
@@ -191,7 +226,48 @@ def resolve_references(
     holding a literal marker string. The exception propagates and `unwrap`
     refuses with nothing written.
     """
+    return _resolve_block(block, resolve, current=None, label="")[0]
+
+
+#: `(server_id, block, field)`: where in a site a credential belongs.
+Coordinate = tuple[str, str, str]
+
+
+def _string_at(current: Optional[Mapping[str, Any]], coordinate: Coordinate) -> Optional[str]:
+    """The non-empty string a site holds at one coordinate, or None."""
+    node: Any = current
+    for key in coordinate:
+        if not isinstance(node, Mapping):
+            return None
+        node = node.get(key)
+    return node if isinstance(node, str) and node else None
+
+
+def _resolve_block(
+    block: Mapping[str, Any],
+    resolve: "Callable[[str, str], str]",
+    *,
+    current: Optional[Mapping[str, Any]],
+    label: str,
+) -> tuple[dict[str, Any], list[Coordinate]]:
+    """`resolve_references`, plus the references the SITE already satisfies.
+
+    An unwrap removes a credential from the store only after the site holds
+    it, and removes the backup after that. A process that dies between the two
+    leaves a backup whose reference no longer resolves, beside a config that
+    already has the value. So when `resolve` raises `CredentialNotStored`, the
+    site's block as it is now (`current`) is consulted: a non-empty string at
+    the same coordinate means the put-back already happened, and that string
+    is carried through untouched. It is never compared with anything and never
+    printed; there is nothing left to compare it with.
+
+    Returns the resolved block and the coordinates satisfied that way. A
+    reference in neither place raises `CredentialUnavailable`, naming the site
+    by `label`. With `current=None` nothing is consulted and the miss
+    propagates as `resolve` raised it.
+    """
     restored: dict[str, Any] = {}
+    in_place: list[Coordinate] = []
     for server_id, entry in block.items():
         if not isinstance(entry, Mapping):
             restored[server_id] = entry
@@ -205,10 +281,20 @@ def resolve_references(
             for key, value in values.items():
                 if isinstance(value, Mapping) and SECRET_REFERENCE_KEY in value:
                     reference = value[SECRET_REFERENCE_KEY]
-                    rebuilt[key] = resolve(reference["leaf"], reference["field"])
+                    try:
+                        rebuilt[key] = resolve(reference["leaf"], reference["field"])
+                    except CredentialNotStored:
+                        if current is None:
+                            raise
+                        coordinate = (str(server_id), name, str(key))
+                        held = _string_at(current, coordinate)
+                        if held is None:
+                            raise CredentialUnavailable(label, *coordinate) from None
+                        rebuilt[key] = held
+                        in_place.append(coordinate)
             updated[name] = rebuilt
         restored[server_id] = updated
-    return restored
+    return restored, in_place
 
 
 @dataclass(frozen=True)
@@ -234,13 +320,26 @@ class WrapBackup:
     harness: str
     wrapped_at: str
     sites: list[SiteBackup]
+    #: The one entry the wrap ADDED, and the label of the site it went into.
+    #: Recorded because an unwrap removes only that entry and keeps anything
+    #: else that appeared since [ruling: maintainer, 2026-10-04], so it has to
+    #: know which entry is the wrap's. Both are None in a backup written before
+    #: this was recorded; see `_gateway_name_at` for how that one is read.
+    gateway_name: Optional[str] = None
+    gateway_site: Optional[str] = None
 
     def to_json(self) -> str:
+        gateway = (
+            {"gateway": {"name": self.gateway_name, "site": self.gateway_site}}
+            if self.gateway_name is not None
+            else {}
+        )
         return json.dumps(
             {
                 "project": self.project,
                 "harness": self.harness,
                 "wrapped_at": self.wrapped_at,
+                **gateway,
                 "sites": [
                     {
                         "scope": s.scope,
@@ -257,22 +356,57 @@ class WrapBackup:
 
     @classmethod
     def from_json(cls, raw: str) -> "WrapBackup":
-        data = json.loads(raw)
-        return cls(
-            project=data["project"],
-            harness=data["harness"],
-            wrapped_at=data["wrapped_at"],
-            sites=[
-                SiteBackup(
-                    scope=s["scope"],
-                    path=s["path"],
-                    pointer=list(s["pointer"]),
-                    block=s["block"],
-                    block_existed=s["block_existed"],
-                )
-                for s in data["sites"]
-            ],
-        )
+        """Parse a backup, or raise `BackupUnreadable` saying what is wrong.
+
+        Everything a restore later indexes is checked HERE, so a truncated or
+        hand-edited backup is one refusal before anything is planned, and not a
+        `KeyError` from the middle of a restore. The reason names a key or a
+        scope and never a value.
+        """
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise BackupUnreadable(
+                f"it is not valid JSON ({exc.msg}, line {exc.lineno})"
+            ) from exc
+        try:
+            gateway = data.get("gateway") or {}
+            backup = cls(
+                project=str(data["project"]),
+                harness=str(data["harness"]),
+                wrapped_at=str(data["wrapped_at"]),
+                sites=[
+                    SiteBackup(
+                        scope=_known_scope(s["scope"]),
+                        path=str(s["path"]),
+                        pointer=[str(key) for key in s["pointer"]],
+                        block=dict(s["block"]),
+                        block_existed=bool(s["block_existed"]),
+                    )
+                    for s in data["sites"]
+                ],
+                gateway_name=gateway.get("name"),
+                gateway_site=gateway.get("site"),
+            )
+            # Walks every credential reference, which is what indexes `leaf`
+            # and `field` later.
+            relocated_references(backup)
+        except KeyError as exc:
+            raise BackupUnreadable(f"it has no {exc.args[0]!r} key") from exc
+        except (TypeError, AttributeError, ValueError) as exc:
+            raise BackupUnreadable(
+                "it does not have the shape tegh writes (a value has the wrong type)"
+            ) from exc
+        return backup
+
+
+def _known_scope(scope: Any) -> str:
+    try:
+        return ConfigScope(scope).value
+    except ValueError:
+        raise BackupUnreadable(
+            f"it names a scope this version of tegh does not know ({scope!r})"
+        ) from None
 
 
 # ---------------------------------------------------------------------------
@@ -361,9 +495,49 @@ def _write_block(site: ConfigSite, block: dict[str, Any], *, prune_empty: bool) 
         node[leaf] = block
 
     site.path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = site.path.with_name(site.path.name + ".tegh-tmp")
-    tmp.write_text(_render(document), encoding="utf-8")
-    tmp.replace(site.path)
+    _replace_file(site.path, _render(document))
+
+
+#: The mode of a config tegh has to CREATE. A file it replaces keeps its own.
+_NEW_CONFIG_MODE = 0o600
+
+
+def _replace_file(path: Path, text: str) -> None:
+    """Replace `path` atomically, with the permission bits it already had.
+
+    A harness config can hold a credential, before a wrap and again after an
+    unwrap, and its owner may have made it 0600 for that reason. The temporary
+    file is therefore CREATED with the existing file's mode, and never by
+    `write_text` under the process umask, which would turn a 0600 config into
+    a 0644 one at exactly the moment a credential is written back into it. The
+    same shape as the credential map in `store.py`: the mode is set at
+    creation, so there is no window in which the bytes are readable more
+    widely than the file they replace.
+
+    A temporary file that fails to become the config is removed, since on an
+    unwrap it holds the resolved credential.
+    """
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except FileNotFoundError:
+        mode = _NEW_CONFIG_MODE
+    tmp = path.with_name(path.name + ".tegh-tmp")
+    # A temporary file of OUR name is left only by a tegh process that died
+    # between creating it and renaming it. O_EXCL below would refuse over it
+    # forever, so it is removed first; nothing else writes that name.
+    tmp.unlink(missing_ok=True)
+    handle = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            # The umask can only have narrowed the mode asked for above, so
+            # this widens the temporary file back to the original's bits and
+            # never past them.
+            os.fchmod(stream.fileno(), mode)
+            stream.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -542,6 +716,8 @@ def apply_interposition(
         harness=harness,
         wrapped_at=wrapped_at,
         sites=originals,
+        gateway_name=plan.gateway_name,
+        gateway_site=plan.gateway_site.label,
     )
 
 
@@ -587,13 +763,31 @@ def relocated_references(backup: WrapBackup) -> list[RelocatedReference]:
     return found
 
 
+#: The gateway entry's name in a backup that did not record one. It is the
+#: only name a wrap has ever used (`InterposePlan.gateway_name`).
+_UNRECORDED_GATEWAY_NAME = "tegh"
+
+
+def _gateway_name_at(backup: WrapBackup, site: ConfigSite) -> Optional[str]:
+    """The name of the entry the wrap added at `site`, or None if it added none.
+
+    A backup that recorded its gateway answers exactly. One that did not is
+    read as "an entry named `tegh`, wherever it is": the wrap put one there,
+    and the cost of the guess is confined to a user who has since added a
+    server of their own under that name at another scope.
+    """
+    if backup.gateway_name is None:
+        return _UNRECORDED_GATEWAY_NAME
+    return backup.gateway_name if backup.gateway_site == site.label else None
+
+
 @dataclass(frozen=True)
 class SiteRestore:
     """What one site must hold after an unwrap, and whether it already does.
 
-    `block` is the RESOLVED pre-wrap block, so it can hold a credential. It is
-    kept out of the repr for that reason: this object ends up in assertion
-    messages and tracebacks.
+    `block` is the RESOLVED pre-wrap block and `target` is what the site ends
+    with, so both can hold a credential. They are kept out of the repr for that
+    reason: this object ends up in assertion messages and tracebacks.
     """
 
     site: ConfigSite
@@ -603,17 +797,74 @@ class SiteRestore:
     #: wrap records all of a harness's sites, and most of them never had a
     #: block and never got one, so "in the backup" does not mean "restored".
     changes: bool
+    #: Entries at the site now that are neither the wrap's gateway entry nor in
+    #: the pre-wrap block: servers added since the wrap. The unwrap KEEPS them
+    #: [ruling: maintainer, 2026-10-04]; it removes only what the wrap put there.
+    kept: tuple[str, ...] = ()
+    #: `block` plus the kept entries. With nothing kept it IS `block`, in the
+    #: same order, which is what keeps the restore byte-for-byte.
+    target: dict[str, Any] = field(repr=False, default_factory=dict)
+    gateway_name: Optional[str] = None
+    #: Credential coordinates the site already held when the store did not.
+    in_place: tuple[Coordinate, ...] = ()
 
     @property
     def servers(self) -> list[str]:
         return sorted(self.block) if self.block_existed else []
 
+    @property
+    def target_exists(self) -> bool:
+        return self.block_existed or bool(self.kept)
 
-def _site_holds(site: ConfigSite, block: Mapping[str, Any], existed: bool) -> bool:
+
+def _merged(
+    site: ConfigSite,
+    block: dict[str, Any],
+    existed: bool,
+    gateway_name: Optional[str],
+    in_place: Sequence[Coordinate] = (),
+) -> SiteRestore:
+    """Merge the pre-wrap block with what the site holds NOW. Reads, never writes.
+
+    Raises `RestoreCollision` when the site holds an entry under the name of a
+    pre-wrap server and the two differ: keeping one would silently drop the
+    other, and choosing between two server definitions is not tegh's to do. An
+    entry EQUAL to the pre-wrap one is no collision. That is the state a re-run
+    finds after an unwrap that restored this site and stopped.
+    """
     _, current, exists_now = _load_site(site)
-    if not existed:
-        return not exists_now
-    return exists_now and current == block
+    kept: dict[str, Any] = {}
+    collisions: list[str] = []
+    for name, entry in current.items():
+        if name == gateway_name:
+            continue
+        if name not in block:
+            kept[name] = entry
+        elif entry != block[name]:
+            collisions.append(name)
+    if collisions:
+        names = ", ".join(sorted(collisions))
+        raise RestoreCollision(
+            f"{site.label} now holds a server named {names}, and the wrap "
+            "displaced a different server of the same name from that scope, "
+            "which an unwrap would put back over it. Nothing was changed. "
+            "Rename or remove one of the two (the entry in that file now, or "
+            "the displaced one in tegh's wrap backup), then run `tegh unwrap` "
+            "again."
+        )
+    target = {**block, **kept}
+    step = SiteRestore(
+        site=site,
+        block=block,
+        block_existed=existed,
+        changes=True,
+        kept=tuple(kept),
+        target=target,
+        gateway_name=gateway_name,
+        in_place=tuple(in_place),
+    )
+    holds = exists_now == step.target_exists and current == target
+    return replace(step, changes=not holds)
 
 
 def plan_restore(
@@ -627,6 +878,10 @@ def plan_restore(
     untouched rather than half-restored — the same fail-toward-changing-nothing
     direction the wrap takes. A backup with no references never calls it, which
     is why it stays optional.
+
+    A `resolve` that raises `CredentialNotStored` is asking this function to
+    look in the site instead (`_resolve_block`). A reference found in neither
+    place raises `CredentialUnavailable`.
     """
     prepared: list[SiteRestore] = []
     for site_backup in backup.sites:
@@ -636,44 +891,85 @@ def plan_restore(
             pointer=tuple(site_backup.pointer),
         )
         block = dict(site_backup.block)
+        in_place: list[Coordinate] = []
         if resolve is not None:
-            block = resolve_references(block, resolve)
-        existed = site_backup.block_existed
+            block, in_place = _resolve_block(
+                block, resolve, current=_load_site(site)[1], label=site.label
+            )
         prepared.append(
-            SiteRestore(
-                site=site,
-                block=block,
-                block_existed=existed,
-                changes=not _site_holds(site, block, existed),
+            _merged(
+                site,
+                block,
+                site_backup.block_existed,
+                _gateway_name_at(backup, site),
+                in_place,
             )
         )
     return prepared
 
 
+def recheck_restore(steps: Sequence[SiteRestore]) -> list[SiteRestore]:
+    """Merge every site again, against the file as it is at apply time.
+
+    The plan was computed before a person was asked, and the harness can write
+    its config while the question waits. The merge is therefore redone here,
+    so what is written keeps what is there NOW. If the entries kept differ from
+    the ones the plan named, the person agreed to something else: this raises
+    `ConfigChangedSincePlan` before any site is written.
+    """
+    fresh = [
+        _merged(step.site, step.block, step.block_existed, step.gateway_name, step.in_place)
+        for step in steps
+    ]
+    for planned, now in zip(steps, fresh):
+        if set(planned.kept) != set(now.kept):
+            raise ConfigChangedSincePlan(
+                f"{planned.site.label} changed while tegh unwrap was waiting: "
+                f"the plan showed {_names(planned.kept)} as added since the "
+                f"wrap, and the file now holds {_names(now.kept)}. Nothing was "
+                "changed. Run `tegh unwrap` again for a plan of what is there "
+                "now."
+            )
+    return fresh
+
+
+def _names(kept: Sequence[str]) -> str:
+    return ", ".join(sorted(kept)) if kept else "no entries"
+
+
+def write_site(step: SiteRestore) -> None:
+    """Write one site's target block.
+
+    A site that ends with no block has its key REMOVED rather than written as
+    `{}` — the difference between "no servers at this scope" and "an empty
+    servers object", which is what byte-identity means for a file that had
+    neither.
+    """
+    _write_block(step.site, step.target, prune_empty=not step.target_exists)
+
+
+def site_restored(step: SiteRestore) -> bool:
+    """Whether the site holds this step's target block, read off the disk."""
+    _, current, exists_now = _load_site(step.site)
+    return exists_now == step.target_exists and current == step.target
+
+
 def apply_restore(steps: Sequence[SiteRestore]) -> None:
     """Write every site that differs, then read EVERY site back and compare.
 
-    A site whose block did not exist before the wrap has its key REMOVED rather
-    than written as `{}` — the difference between "no servers at this scope" and
-    "an empty servers object", which is what byte-identity means for a file that
-    had neither.
-
     The read-back is what a caller holding the only other copy of a credential
     waits for before it deletes that copy: a write that returned is not a value
-    on disk. The comparison is in memory and the mismatch names the site, never
-    the contents.
+    on disk. The comparison is in memory, against the merged block this call
+    meant to write, and the mismatch names the site, never the contents.
     """
-    for step in steps:
-        if not step.changes:
-            continue
-        if not step.block_existed:
-            _write_block(step.site, {}, prune_empty=True)
-        else:
-            _write_block(step.site, step.block, prune_empty=False)
-    for step in steps:
-        if not _site_holds(step.site, step.block, step.block_existed):
+    fresh = recheck_restore(steps)
+    for step in fresh:
+        if step.changes:
+            write_site(step)
+    for step in fresh:
+        if not site_restored(step):
             raise RestoreUnverified(
-                f"{step.site.label} does not hold the pre-wrap block after the "
+                f"{step.site.label} does not hold the restored block after the "
                 "restore was written (read back and compared). Something else "
                 "is writing this file, or the write did not land."
             )
@@ -682,10 +978,11 @@ def apply_restore(steps: Sequence[SiteRestore]) -> None:
 def restore(
     backup: WrapBackup, *, resolve: Optional[Callable[[str, str], str]] = None
 ) -> list[str]:
-    """Put every site's `mcpServers` block back exactly as it was.
+    """Put back every pre-wrap server, and take out the entry the wrap added.
 
-    Returns the labels of the sites it CHANGED, which is not every site in the
-    backup: see :class:`SiteRestore`.
+    With nothing added since the wrap that is each site's `mcpServers` block
+    exactly as it was. Returns the labels of the sites it CHANGED, which is not
+    every site in the backup: see :class:`SiteRestore`.
     """
     steps = plan_restore(backup, resolve=resolve)
     apply_restore(steps)

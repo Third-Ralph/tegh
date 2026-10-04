@@ -409,8 +409,12 @@ more record, which is yours:
 tegh unwrap --project "$(pwd)"
 ```
 
-tegh first lists everything it is about to change and what it will leave alone, then asks. Answer
-`y` (or press Enter) to go ahead. Any other answer changes nothing and exits 1.
+Quit the coding agent in this project first. A session that is still running can rewrite its
+config from memory after the restore, and tegh does not check for one: the plan reminds you, and
+that is all it does.
+
+tegh lists everything it is about to change and what it will leave alone, then asks. Answer `y`
+(or press Enter) to go ahead. Any other answer changes nothing and exits 1.
 
 ```
 tegh unwrap will change, for /Users/you/tegh-demo:
@@ -423,6 +427,8 @@ It leaves untouched:
   tegh.lock and the admitted rows, so re-wrapping does not re-run the ceremony
   the audit tape at /Users/you/.tegh/projects/tegh-demo-7f74e45c2bca/audit.jsonl
 
+Quit the coding agent in this project before you proceed: a session that is still running can rewrite its config from memory after the restore.
+
 Proceed? [Y/n] y
   restored  local:/Users/you/tegh-demo-home/.claude.json  (memory)
   removed   tegh's wrap backup at /Users/you/.tegh/projects/tegh-demo-7f74e45c2bca/wrap-backup.json
@@ -430,17 +436,28 @@ Proceed? [Y/n] y
 unwrapped /Users/you/tegh-demo (wrapped 2026-10-04T15:11:54.699203+00:00). The harness reaches its original servers directly again. tegh.lock, the admitted rows and the audit tape are untouched, so re-wrapping does not re-run the ceremony.
 ```
 
-Restores the displaced config **byte-for-byte**. Only the files the unwrap really changes are
-listed: this project had no `.mcp.json` and no user-scope servers, so neither appears.
+Restores the displaced config **byte-for-byte**, with the permission bits the file already had.
+Only the files the unwrap really changes are listed: this project had no `.mcp.json` and no
+user-scope servers, so neither appears.
+
+The unwrap takes out only what the wrap put in. A server you added to a wrapped scope since the
+wrap (with `claude mcp add`, or a new `.mcp.json`) is kept, and the plan names it on a `keep` line
+ending `added since the wrap`. If it has the same name as a server the unwrap is about to put back,
+tegh refuses before changing anything and names the scope and the server; rename or remove one of
+the two and run it again.
 
 This walk relocated no credential. When a wrap did move one out of your config (you answered
 CREDENTIAL in the review), the plan carries two more lines for it, naming the server and the field
 and never the value: the credential is put back into the harness config, and then removed from
 tegh's store. The removal happens only after tegh has read the restored config back and found the
-value there, so a failed restore leaves the store's copy where it was.
+value there, so a failed restore leaves the store's copy where it was. If the restore stops
+part-way, the message lists which files were restored and which were not, and says which
+credential is for now in both a restored file and the store. Run `tegh unwrap` again to finish; it
+works from what is on disk, including after an unwrap that was killed.
 
-From a script, where nobody can answer, pass `--yes`. Without it, a stdin that is not a terminal is
-refused and nothing is changed.
+From a script, where nobody can answer, pass `--yes`. Without it, the prompt needs a terminal on
+both stdin and stdout: a piped answer, or `tegh unwrap > out.txt` with the plan going into a file
+nobody is reading, is refused and nothing is changed.
 
 ---
 

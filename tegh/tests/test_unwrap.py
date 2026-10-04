@@ -6,10 +6,11 @@ Three claims, each with a way to be false that this file exercises:
    harness config and in no file tegh keeps. Checked by scanning every file
    under the test's tree for the value, since "the store no longer lists it" is
    a statement about one file.
-2. **Nothing changes without a yes.** A "no", an end-of-file and a stdin that is
-   not a terminal all leave every byte where it was. The non-terminal and
-   end-of-file cases run `tegh` as a real subprocess with a real closed stdin
-   or a real pseudo-terminal; only the plain "n" answers use the prompt seam.
+2. **Nothing changes without a yes.** A "no", an end-of-file, and a stdin or a
+   stdout that is not a terminal all leave every byte where it was. The
+   non-terminal and end-of-file cases run `tegh` as a real subprocess with a
+   real pipe, a real closed descriptor or a real pseudo-terminal; only the
+   plain "n" answers use the prompt seam.
 3. **The plan and the report name only what happens.** A wrap records every
    site a harness has, so the report used to list a `.mcp.json` that never
    existed. The plan and the report are compared with each other and with the
@@ -18,75 +19,36 @@ Three claims, each with a way to be false that this file exercises:
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import re
 import stat
 import subprocess
 import sys
-from pathlib import Path
+import threading
 
 import pytest
 
 pytest.importorskip("mcp", reason="a real wrap snapshots a real MCP server")
 
 from tegh import interpose, unwrap  # noqa: E402
-from tegh.cli import _parse_args, main, unwrap_command  # noqa: E402
 from tegh.harnesses import claude_code  # noqa: E402
 from tegh.store import TeghStore, TeghStoreError  # noqa: E402
+from tegh.tests.wrapping import LEDGER_FIELD as _FIELD  # noqa: E402
+from tegh.tests.wrapping import LEDGER_SECRET as _SECRET  # noqa: E402
 from tegh.tests.wrapping import (  # noqa: E402
     REPO,
-    give_ledger,
+    files_holding,
+    fingerprint,
     scripted,
-    store_of,
+    site_files,
     wrap_answering,
 )
-
-_SECRET = "not-a-real-credential-ledger-fixture"
-_FIELD = "LEDGER_API_KEY"
+from tegh.tests.wrapping import unwrap_cli as _unwrap  # noqa: E402
 
 #: An action line of the plan or the report: two spaces, a verb, the rest.
 _ACTION_LINE = re.compile(r"^  (restored?|put back|removed?)\s{2,}(.+)$")
 _TENSE = {"restore": "restored", "put back": "put back", "remove": "removed"}
-
-
-@pytest.fixture
-def wrapped(harness, capsys) -> dict:
-    """The `harness` project, wrapped, with one credential relocated."""
-    before = give_ledger(harness, env={_FIELD: _SECRET})
-    assert main(["init"]) == 0
-    # The empty answer classifies the value as a credential, which relocates it.
-    assert wrap_answering(harness, scripted([""])) == 0
-    capsys.readouterr()
-    store = store_of(harness)
-    assert _SECRET in store.secrets_path(harness["project"]).read_text(encoding="utf-8")
-    return {**harness, "before": before, "store": store, "root": harness["home"].parent}
-
-
-def _files_holding_the_secret(wrapped: dict) -> list[Path]:
-    needle = _SECRET.encode("utf-8")
-    return [
-        path
-        for path in sorted(wrapped["root"].rglob("*"))
-        if path.is_file() and needle in path.read_bytes()
-    ]
-
-
-def _fingerprint(wrapped: dict) -> dict[str, str]:
-    """Every file under the test's tree, by content. Equal means nothing changed."""
-    return {
-        str(path.relative_to(wrapped["root"])): hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in sorted(wrapped["root"].rglob("*"))
-        if path.is_file()
-    }
-
-
-def _unwrap(wrapped: dict, *flags: str, prompt=None) -> int:
-    return unwrap_command(
-        _parse_args(["unwrap", *flags, "--project", str(wrapped["project"])]),
-        prompt=prompt,
-    )
 
 
 def _actions(text: str) -> list[tuple[str, str]]:
@@ -117,13 +79,13 @@ def _unwrap_argv(wrapped: dict) -> list[str]:
 def test_unwrap_removes_the_relocated_credential_from_the_store(wrapped, capsys) -> None:
     store, project = wrapped["store"], wrapped["project"]
     secrets_path = store.secrets_path(project)
-    assert _files_holding_the_secret(wrapped) == [secrets_path]
+    assert files_holding(wrapped["root"], _SECRET) == [secrets_path]
 
     assert _unwrap(wrapped, "--yes") == 0
     captured = capsys.readouterr()
 
     assert wrapped["claude_json"].read_bytes() == wrapped["before"]
-    assert _files_holding_the_secret(wrapped) == [wrapped["claude_json"]], (
+    assert files_holding(wrapped["root"], _SECRET) == [wrapped["claude_json"]], (
         "a copy of the relocated credential outlived the unwrap"
     )
     # The file stays, empty and owner-only: the state `ensure_secrets_file`
@@ -143,12 +105,12 @@ def test_rewrap_after_unwrap_relocates_the_credential_again(wrapped, capsys) -> 
     assert wrap_answering(wrapped, scripted([""])) == 0
 
     store, project = wrapped["store"], wrapped["project"]
-    assert _files_holding_the_secret(wrapped) == [store.secrets_path(project)]
+    assert files_holding(wrapped["root"], _SECRET) == [store.secrets_path(project)]
     assert json.loads(store.read_secrets(project)["ledger"]) == {_FIELD: _SECRET}
 
     assert _unwrap(wrapped, "--yes") == 0
     assert wrapped["claude_json"].read_bytes() == wrapped["before"]
-    assert _files_holding_the_secret(wrapped) == [wrapped["claude_json"]]
+    assert files_holding(wrapped["root"], _SECRET) == [wrapped["claude_json"]]
     assert _SECRET not in "".join(capsys.readouterr())
 
 
@@ -159,13 +121,13 @@ def test_rewrap_after_unwrap_relocates_the_credential_again(wrapped, capsys) -> 
 
 @pytest.mark.parametrize("answer", ["n", "N", "no", "not sure"])
 def test_anything_but_yes_changes_nothing(wrapped, capsys, answer: str) -> None:
-    before = _fingerprint(wrapped)
+    before = fingerprint(wrapped["root"])
 
     rc = _unwrap(wrapped, prompt=scripted([answer]))
     captured = capsys.readouterr()
 
     assert rc == unwrap.EXIT_NOT_UNWRAPPED
-    assert _fingerprint(wrapped) == before
+    assert fingerprint(wrapped["root"]) == before
     assert captured.err.strip() == "NOT UNWRAPPED: nothing was changed."
     # The plan was shown before the question, and no report followed it.
     assert "restore" in [verb for verb, _ in _actions(captured.out)]
@@ -176,13 +138,13 @@ def test_anything_but_yes_changes_nothing(wrapped, capsys, answer: str) -> None:
 @pytest.mark.parametrize("answer", ["", "y", "Y", "yes"])
 def test_a_yes_at_the_prompt_unwraps(wrapped, capsys, answer: str) -> None:
     assert _unwrap(wrapped, prompt=scripted([answer])) == 0
-    assert _files_holding_the_secret(wrapped) == [wrapped["claude_json"]]
+    assert files_holding(wrapped["root"], _SECRET) == [wrapped["claude_json"]]
 
 
 @pytest.mark.parametrize(
     "stdin",
     [
-        pytest.param({"stdin": subprocess.DEVNULL}, id="closed-stdin"),
+        pytest.param({"stdin": subprocess.DEVNULL}, id="null-stdin"),
         pytest.param({"input": ""}, id="empty-pipe"),
         # A piped "y" is not a person at a terminal. `--yes` is how a script
         # agrees, and the pipe must not become a second way to.
@@ -190,7 +152,7 @@ def test_a_yes_at_the_prompt_unwraps(wrapped, capsys, answer: str) -> None:
     ],
 )
 def test_a_stdin_that_is_not_a_terminal_refuses_and_names_the_flag(wrapped, stdin) -> None:
-    before = _fingerprint(wrapped)
+    before = fingerprint(wrapped["root"])
 
     done = subprocess.run(  # noqa: S603 - fixed argv, no shell
         _unwrap_argv(wrapped), env=_child_env(wrapped), cwd=REPO,
@@ -198,12 +160,80 @@ def test_a_stdin_that_is_not_a_terminal_refuses_and_names_the_flag(wrapped, stdi
     )
 
     assert done.returncode == unwrap.EXIT_NOT_UNWRAPPED, done.stderr
-    assert _fingerprint(wrapped) == before
+    assert fingerprint(wrapped["root"]) == before
     assert "Traceback" not in done.stderr
     assert "--yes" in done.stderr
     assert "Nothing was changed" in done.stderr
     assert len(done.stderr.strip().splitlines()) == 1, done.stderr
     assert _SECRET not in done.stdout + done.stderr
+
+
+def test_a_closed_stdin_refuses_without_a_traceback(wrapped) -> None:
+    """`tegh unwrap <&-`: descriptor 0 is CLOSED, which is not the same as empty.
+
+    Python then starts with `sys.stdin` as None, so asking it whether it is a
+    terminal is an AttributeError unless the check expects that. The shell does
+    the closing, because that is where a person meets this.
+    """
+    before = fingerprint(wrapped["root"])
+
+    done = subprocess.run(  # noqa: S603 - fixed argv; the shell only closes fd 0
+        ["/bin/sh", "-c", 'exec "$@" <&-', "sh", *_unwrap_argv(wrapped)],
+        env=_child_env(wrapped), cwd=REPO,
+        capture_output=True, text=True, check=False, timeout=60,
+    )
+
+    assert done.returncode == unwrap.EXIT_NOT_UNWRAPPED, done.stderr
+    assert fingerprint(wrapped["root"]) == before
+    assert "Traceback" not in done.stderr
+    # stdout is this test's capture pipe, so both ends are named.
+    assert done.stderr.startswith("REFUSED: stdin and stdout are not terminals"), done.stderr
+    assert "--yes" in done.stderr
+    assert len(done.stderr.strip().splitlines()) == 1, done.stderr
+    assert _SECRET not in done.stdout + done.stderr
+
+
+def _on_a_terminal(
+    wrapped: dict, typed: bytes, *, stdout_is_terminal: bool = True
+) -> tuple[int, str, str]:
+    """Run `tegh unwrap` with a pseudo-terminal on stdin. Returns `(status, out, err)`.
+
+    stdout is the same terminal unless `stdout_is_terminal` is False, in which
+    case it is a pipe: what `tegh unwrap > out.txt` gives a person who is
+    sitting at the keyboard.
+    """
+    pty = pytest.importorskip("pty", reason="needs a pseudo-terminal")
+    master, slave = pty.openpty()
+    shown: list[bytes] = []
+
+    def _drain() -> None:
+        # Until the last holder of the terminal exits: end-of-file on macOS,
+        # EIO on Linux.
+        while True:
+            try:
+                chunk = os.read(master, 4096)
+            except OSError:
+                return
+            if not chunk:
+                return
+            shown.append(chunk)
+
+    reader = threading.Thread(target=_drain, daemon=True)
+    try:
+        child = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
+            _unwrap_argv(wrapped), env=_child_env(wrapped), cwd=REPO, stdin=slave,
+            stdout=slave if stdout_is_terminal else subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        os.close(slave)
+        reader.start()
+        os.write(master, typed)
+        piped, err = child.communicate(timeout=60)
+        reader.join(timeout=10)
+    finally:
+        os.close(master)
+    out = b"".join(shown) if stdout_is_terminal else piped
+    return child.returncode, out.decode("utf-8"), err.decode("utf-8")
 
 
 @pytest.mark.parametrize(
@@ -213,33 +243,46 @@ def test_a_stdin_that_is_not_a_terminal_refuses_and_names_the_flag(wrapped, stdi
         # Ctrl-D on an empty line: a real end-of-file on a real terminal.
         pytest.param(b"\x04", unwrap.EXIT_NOT_UNWRAPPED, "--yes", id="end-of-file"),
         pytest.param(b"y\n", unwrap.EXIT_OK, "", id="y"),
+        # Bare Enter takes the capitalised default, which is yes.
+        pytest.param(b"\n", unwrap.EXIT_OK, "", id="enter"),
     ],
 )
 def test_the_prompt_on_a_real_terminal(wrapped, typed: bytes, status: int, says: str) -> None:
-    pty = pytest.importorskip("pty", reason="needs a pseudo-terminal")
-    before = _fingerprint(wrapped)
+    before = fingerprint(wrapped["root"])
 
-    master, slave = pty.openpty()
-    try:
-        child = subprocess.Popen(  # noqa: S603 - fixed argv, no shell
-            _unwrap_argv(wrapped), env=_child_env(wrapped), cwd=REPO,
-            stdin=slave, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        )
-        os.close(slave)
-        os.write(master, typed)
-        out, err = (raw.decode("utf-8") for raw in child.communicate(timeout=60))
-    finally:
-        os.close(master)
+    returncode, out, err = _on_a_terminal(wrapped, typed)
 
-    assert child.returncode == status, err
+    assert returncode == status, err
     assert unwrap.QUESTION in out
     assert "Traceback" not in err
     assert says in err
     assert _SECRET not in out + err
     if status == unwrap.EXIT_OK:
-        assert _files_holding_the_secret(wrapped) == [wrapped["claude_json"]]
+        assert files_holding(wrapped["root"], _SECRET) == [wrapped["claude_json"]]
     else:
-        assert _fingerprint(wrapped) == before
+        assert fingerprint(wrapped["root"]) == before
+
+
+@pytest.mark.parametrize("typed", [b"\n", b"y\n"], ids=["enter", "y"])
+def test_a_stdout_that_is_not_a_terminal_refuses_even_with_a_person_typing(
+    wrapped, typed: bytes
+) -> None:
+    """`tegh unwrap > out.txt`: the plan and the question went into the file.
+
+    The person at the keyboard saw nothing, so their Enter is not agreement to
+    anything. The question is never asked, and the flag is named.
+    """
+    before = fingerprint(wrapped["root"])
+
+    returncode, out, err = _on_a_terminal(wrapped, typed, stdout_is_terminal=False)
+
+    assert returncode == unwrap.EXIT_NOT_UNWRAPPED, err
+    assert fingerprint(wrapped["root"]) == before
+    assert unwrap.QUESTION not in out
+    assert err.startswith("REFUSED: stdout is not a terminal"), err
+    assert "--yes" in err and "Nothing was changed" in err
+    assert len(err.strip().splitlines()) == 1, err
+    assert "Traceback" not in err
 
 
 # ---------------------------------------------------------------------------
@@ -264,7 +307,7 @@ def test_a_failed_restore_leaves_the_store_copy(
     if os.geteuid() == 0:
         pytest.skip("root writes through a read-only directory")
     store, project = wrapped["store"], wrapped["project"]
-    before = _fingerprint(wrapped)
+    before = fingerprint(wrapped["root"])
 
     break_restore(wrapped, monkeypatch)
     try:
@@ -274,7 +317,7 @@ def test_a_failed_restore_leaves_the_store_copy(
     captured = capsys.readouterr()
 
     assert rc == unwrap.EXIT_NOT_UNWRAPPED
-    assert _fingerprint(wrapped) == before, "a failed restore still changed something"
+    assert fingerprint(wrapped["root"]) == before, "a failed restore still changed something"
     assert json.loads(store.read_secrets(project)["ledger"]) == {_FIELD: _SECRET}
     assert "the harness config was not restored" in captured.err
     assert f"still in tegh's store at {store.secrets_path(project)}" in captured.err
@@ -305,7 +348,7 @@ def test_a_failed_removal_names_the_file_and_a_rerun_finishes(
     # The rerun has one thing left to do, and says only that.
     assert _unwrap(wrapped, "--yes") == 0
     report = capsys.readouterr().out
-    assert _files_holding_the_secret(wrapped) == [wrapped["claude_json"]]
+    assert files_holding(wrapped["root"], _SECRET) == [wrapped["claude_json"]]
     assert {verb for verb, _ in _actions(report)} == {"remove", "removed"}, report
 
 
@@ -340,30 +383,6 @@ def test_the_plan_and_the_report_agree_and_name_no_file_that_never_existed(
     assert named and named <= existed, named - existed
 
 
-def _site_files(tmp_path: Path, *, local, project_scope, user) -> tuple[Path, Path, Path]:
-    """A harness home and project holding the given `mcpServers` blocks.
-
-    `None` means the scope has no block at all, which is the usual state of two
-    of the three.
-    """
-    project = tmp_path / "widget"
-    project.mkdir()
-    document: dict = {"projects": {str(project): {"lastSessionId": "abc"}}}
-    if local is not None:
-        document["projects"][str(project)]["mcpServers"] = local
-    if user is not None:
-        document["mcpServers"] = user
-    claude_json = tmp_path / ".claude.json"
-    claude_json.write_text(json.dumps(document, indent=2, ensure_ascii=False), encoding="utf-8")
-    project_mcp = project / ".mcp.json"
-    if project_scope is not None:
-        project_mcp.write_text(
-            json.dumps({"mcpServers": project_scope}, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-    return project, claude_json, project_mcp
-
-
 _NOTES = {"notes": {"command": "notes-server"}}
 _FETCH = {"fetch": {"command": "fetch-server"}}
 
@@ -390,7 +409,7 @@ _FETCH = {"fetch": {"command": "fetch-server"}}
 def test_only_sites_the_unwrap_changes_are_listed(
     tmp_path, local, project_scope, user, expected
 ) -> None:
-    project, claude_json, project_mcp = _site_files(
+    project, claude_json, project_mcp = site_files(
         tmp_path, local=local, project_scope=project_scope, user=user
     )
     originals = {

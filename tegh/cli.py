@@ -1356,19 +1356,12 @@ def unwrap_command(
     """Restore the harness config this project's wrap displaced.
 
     Says what it will change and asks first; `--yes` answers in advance. The
-    plan, the order of the writes and the report are `tegh.unwrap`'s.
+    plan, the refusals, the order of the writes and the report are all
+    `tegh.unwrap`'s.
     """
     project = Path(args.project).expanduser().resolve()
     store = TeghStore(home=Path(args.home).expanduser() if args.home else tegh_home())
-    try:
-        plan = unwrap.build_plan(store, project)
-    except interpose.InterposeError as exc:
-        print(f"REFUSED: {exc}", file=sys.stderr)
-        return unwrap.EXIT_REFUSED
-    print(unwrap.render_plan(plan))
-    if not args.yes and not unwrap.confirm(unwrap.QUESTION, prompt=prompt):
-        return unwrap.EXIT_NOT_UNWRAPPED
-    return unwrap.apply_plan(store, plan)
+    return unwrap.run(store, project, yes=args.yes, prompt=prompt)
 
 
 # ---------------------------------------------------------------------------
@@ -1721,9 +1714,22 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
             "restore the harness config a wrap displaced, and move any relocated "
             "credential back into it"
         ),
+        description=(
+            "Take the tegh gateway entry out of the harness config, put back "
+            "the servers the wrap displaced, and move any relocated credential "
+            "from tegh's store back into that config. Servers added since the "
+            "wrap are kept. The plan is printed first and nothing changes "
+            "until it is agreed to. Quit the coding agent in this project "
+            "first: tegh does not check for a running session."
+        ),
     )
     unwrap_parser.add_argument(
-        "--yes", action="store_true", help="skip the confirmation prompt"
+        "--yes",
+        action="store_true",
+        help=(
+            "agree to the plan in advance. Without it the prompt needs a "
+            "terminal on both stdin and stdout, and is refused otherwise"
+        ),
     )
     with_project(unwrap_parser)
     with_home(unwrap_parser)
