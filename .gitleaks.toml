@@ -1,0 +1,16 @@
+title = "tegh gitleaks config"
+
+# The default rule set, plus an allowlist for the clearly-fake placeholder values
+# the test fixtures use.
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Allow clearly-fake placeholder values used in test fixtures"
+regexes = [
+  '''DUMMY-[A-Z-]+-FIXTURE''',
+  '''oauth-tok-(abc|xyz)''',
+  # A dataclass field annotation in tegh/signing.py (`_private_key: Ed25519PrivateKey`);
+  # gitleaks extracts the class name as the "secret". A class name is never secret material.
+  '''^Ed25519PrivateKey$''',
+]

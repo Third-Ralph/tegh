@@ -1,0 +1,885 @@
+
+== 0. preflight
+   user=kube:admin
+   server=https://api.cluster.example.com:6443
+   PASS cluster reachable
+
+== 1. the declarative half
+namespace/safe-agents created
+serviceaccount/safe-agents-agent created
+serviceaccount/safe-agents-broker created
+serviceaccount/safe-agents-checker created
+serviceaccount/safe-agents-maker created
+serviceaccount/safe-agents-peer created
+configmap/safe-agents-drill-scripts created
+secret/safe-agents-connector-secrets created
+service/safe-agents-broker created
+persistentvolumeclaim/safe-agents-store created
+buildconfig.build.openshift.io/safe-agents-broker-base created
+buildconfig.build.openshift.io/safe-agents-missileer created
+imagestream.image.openshift.io/safe-agents-broker-base created
+imagestream.image.openshift.io/safe-agents-missileer created
+networkpolicy.networking.k8s.io/safe-agents-agent-egress created
+networkpolicy.networking.k8s.io/safe-agents-broker-egress created
+networkpolicy.networking.k8s.io/safe-agents-broker-ingress created
+networkpolicy.networking.k8s.io/safe-agents-peer-ingress created
+   PASS namespace, ServiceAccounts, builds, PVC, connector secrets, drill scripts, netpol
+
+== 1b. the one NetworkPolicy rule that cannot be checked in
+   PASS agent -> API server allowed at 10.0.75.192 10.0.84.106 10.0.97.29 on port 6443 (generated, cluster-specific)
+
+== 2. per-run secrets — generated here, never committed
+   PASS issuer signing key + broker HMAC key minted for this run
+   PASS peer transport token minted; the broker holds the descriptor, the agent holds neither
+
+== 3. in-cluster builds — the SAME Containerfiles the laptop and CI build
+Uploading directory "/Users/you/Code/safe-agents" as binary input for the build ...
+.......
+Uploading finished
+build.build.openshift.io/safe-agents-broker-base-1 started
+Receiving source from STDIN as archive ...
+time="2026-08-11T04:09:29Z" level=info msg="Not using native diff for overlay, this may cause degraded performance for building images: kernel has CONFIG_OVERLAY_FS_REDIRECT_DIR enabled"
+I0811 04:09:29.821220       1 defaults.go:112] Defaulting to storage driver "overlay" with options [mountopt=metacopy=on].
+Caching blobs under "/var/cache/blobs".
+
+Pulling image python:3.12-slim ...
+Resolving "python" using unqualified-search registries (/etc/containers/registries.conf)
+Trying to pull registry.redhat.io/python:3.12-slim...
+Trying to pull registry.access.redhat.com/python:3.12-slim...
+Trying to pull quay.io/python:3.12-slim...
+Trying to pull docker.io/library/python:3.12-slim...
+Getting image source signatures
+Copying blob sha256:b3c7a9bdb4f2a30d0a1358438d1539c06b86da99135cfd9d92756863cc87ae18
+Copying blob sha256:5a31db4cd47898e862a567028aa41f7a11d814cf69be6904173402a8b8eac5cb
+Copying blob sha256:c85ad0bcaca895afa08053538ec1ea7642c7e9e05f5684d18e3627a2316ca8ae
+Copying blob sha256:26c307b5e35a59ce911f5fde5b9458120ec8734e831ea2da5649a9ad14abfd3d
+Copying config sha256:54a0b2beae90fe14c2131f1e880e1388c9df77390bc260d7317e589765e064e8
+Writing manifest to image destination
+Adding transient rw bind mount for /run/secrets/rhsm
+STEP 1/14: FROM python:3.12-slim
+STEP 2/14: WORKDIR /app
+--> 7810841c0c21
+STEP 3/14: COPY pyproject.toml README.md ./
+--> e7f3a3475906
+STEP 4/14: COPY safe_agents ./safe_agents
+--> 15d4bcc62c68
+STEP 5/14: RUN pip install --no-cache-dir ".[aws]"
+Processing /app
+  Installing build dependencies: started
+  Installing build dependencies: finished with status 'done'
+  Getting requirements to build wheel: started
+  Getting requirements to build wheel: finished with status 'done'
+  Preparing metadata (pyproject.toml): started
+  Preparing metadata (pyproject.toml): finished with status 'done'
+Collecting pydantic>=2.13.4 (from safe-agents==0.72.0)
+  Downloading pydantic-2.13.4-py3-none-any.whl.metadata (109 kB)
+Collecting PyYAML>=6.0 (from safe-agents==0.72.0)
+  Downloading pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl.metadata (2.4 kB)
+Collecting cryptography>=42.0 (from safe-agents==0.72.0)
+  Downloading cryptography-50.0.0-cp311-abi3-manylinux_2_34_x86_64.whl.metadata (4.3 kB)
+Collecting whenever<0.11,>=0.10.2 (from safe-agents==0.72.0)
+  Downloading whenever-0.10.5-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (11 kB)
+Collecting boto3>=1.34 (from safe-agents==0.72.0)
+  Downloading boto3-1.43.68-py3-none-any.whl.metadata (6.6 kB)
+Collecting botocore<1.44.0,>=1.43.68 (from boto3>=1.34->safe-agents==0.72.0)
+  Downloading botocore-1.43.68-py3-none-any.whl.metadata (5.6 kB)
+Collecting jmespath<2.0.0,>=0.7.1 (from boto3>=1.34->safe-agents==0.72.0)
+  Downloading jmespath-1.1.0-py3-none-any.whl.metadata (7.6 kB)
+Collecting s3transfer<0.20.0,>=0.19.0 (from boto3>=1.34->safe-agents==0.72.0)
+  Downloading s3transfer-0.19.2-py3-none-any.whl.metadata (1.7 kB)
+Collecting cffi>=2.0.0 (from cryptography>=42.0->safe-agents==0.72.0)
+  Downloading cffi-2.1.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl.metadata (2.5 kB)
+Collecting annotated-types>=0.6.0 (from pydantic>=2.13.4->safe-agents==0.72.0)
+  Downloading annotated_types-0.8.0-py3-none-any.whl.metadata (15 kB)
+Collecting pydantic-core==2.46.4 (from pydantic>=2.13.4->safe-agents==0.72.0)
+  Downloading pydantic_core-2.46.4-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (6.6 kB)
+Collecting typing-extensions>=4.14.1 (from pydantic>=2.13.4->safe-agents==0.72.0)
+  Downloading typing_extensions-4.16.0-py3-none-any.whl.metadata (3.3 kB)
+Collecting typing-inspection>=0.4.2 (from pydantic>=2.13.4->safe-agents==0.72.0)
+  Downloading typing_inspection-0.4.3-py3-none-any.whl.metadata (2.6 kB)
+Collecting python-dateutil<3.0.0,>=2.1 (from botocore<1.44.0,>=1.43.68->boto3>=1.34->safe-agents==0.72.0)
+  Downloading python_dateutil-2.9.0.post0-py2.py3-none-any.whl.metadata (8.4 kB)
+Collecting urllib3!=2.2.0,<3,>=1.25.4 (from botocore<1.44.0,>=1.43.68->boto3>=1.34->safe-agents==0.72.0)
+  Downloading urllib3-2.7.0-py3-none-any.whl.metadata (6.9 kB)
+Collecting pycparser (from cffi>=2.0.0->cryptography>=42.0->safe-agents==0.72.0)
+  Downloading pycparser-3.0-py3-none-any.whl.metadata (8.2 kB)
+Collecting six>=1.5 (from python-dateutil<3.0.0,>=2.1->botocore<1.44.0,>=1.43.68->boto3>=1.34->safe-agents==0.72.0)
+  Downloading six-1.17.0-py2.py3-none-any.whl.metadata (1.7 kB)
+Downloading boto3-1.43.68-py3-none-any.whl (140 kB)
+Downloading cryptography-50.0.0-cp311-abi3-manylinux_2_34_x86_64.whl (4.7 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 4.7/4.7 MB 110.1 MB/s eta 0:00:00
+Downloading pydantic-2.13.4-py3-none-any.whl (472 kB)
+Downloading pydantic_core-2.46.4-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (2.1 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 2.1/2.1 MB 508.2 MB/s eta 0:00:00
+Downloading pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl (807 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 807.9/807.9 kB 469.2 MB/s eta 0:00:00
+Downloading whenever-0.10.5-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (599 kB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 599.9/599.9 kB 225.8 MB/s eta 0:00:00
+Downloading annotated_types-0.8.0-py3-none-any.whl (13 kB)
+Downloading botocore-1.43.68-py3-none-any.whl (15.6 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 15.6/15.6 MB 388.5 MB/s eta 0:00:00
+Downloading cffi-2.1.1-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl (221 kB)
+Downloading jmespath-1.1.0-py3-none-any.whl (20 kB)
+Downloading s3transfer-0.19.2-py3-none-any.whl (90 kB)
+Downloading typing_extensions-4.16.0-py3-none-any.whl (45 kB)
+Downloading typing_inspection-0.4.3-py3-none-any.whl (14 kB)
+Downloading python_dateutil-2.9.0.post0-py2.py3-none-any.whl (229 kB)
+Downloading urllib3-2.7.0-py3-none-any.whl (131 kB)
+Downloading pycparser-3.0-py3-none-any.whl (48 kB)
+Downloading six-1.17.0-py2.py3-none-any.whl (11 kB)
+Building wheels for collected packages: safe-agents
+  Building wheel for safe-agents (pyproject.toml): started
+  Building wheel for safe-agents (pyproject.toml): finished with status 'done'
+  Created wheel for safe-agents: filename=safe_agents-0.72.0-py3-none-any.whl size=1014428 sha256=0afb40a88ac92b566342656d57fada16e8354b06525f95250a8a95e37c7f94df
+  Stored in directory: /tmp/pip-ephem-wheel-cache-5cl77n83/wheels/54/1b/b7/aa63e25c8f14f4f2ae7b04e6097bdecb770e455c5c1ee0a600
+Successfully built safe-agents
+Installing collected packages: whenever, urllib3, typing-extensions, six, PyYAML, pycparser, jmespath, annotated-types, typing-inspection, python-dateutil, pydantic-core, cffi, pydantic, cryptography, botocore, safe-agents, s3transfer, boto3
+Successfully installed PyYAML-6.0.3 annotated-types-0.8.0 boto3-1.43.68 botocore-1.43.68 cffi-2.1.1 cryptography-50.0.0 jmespath-1.1.0 pycparser-3.0 pydantic-2.13.4 pydantic-core-2.46.4 python-dateutil-2.9.0.post0 s3transfer-0.19.2 safe-agents-0.72.0 six-1.17.0 typing-extensions-4.16.0 typing-inspection-0.4.3 urllib3-2.7.0 whenever-0.10.5
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+
+[notice] A new release of pip is available: 25.0.1 -> 26.2.1
+[notice] To update, run: pip install --upgrade pip
+--> 5f47a96a4aec
+STEP 6/14: COPY safe_agents/arms/ec2/bootstrap/scripts/model-proxy-stub.py /app/model-proxy-stub.py
+--> 801f99b8b038
+STEP 7/14: COPY safe_agents/arms/local/broker-entrypoint.sh /app/broker-entrypoint.sh
+--> ec9a77591638
+STEP 8/14: RUN useradd -m broker     && usermod -aG 0 broker     && chgrp -R 0 /home/broker     && chmod -R g=u /home/broker
+--> ad07fe94c3d6
+STEP 9/14: ENV HOME=/home/broker
+--> 22fd5b433ce8
+STEP 10/14: USER broker
+--> 0639967fd2c9
+STEP 11/14: EXPOSE 8080 8443
+--> c56ac6ec12cc
+STEP 12/14: ENTRYPOINT ["bash","/app/broker-entrypoint.sh"]
+--> 895f822a0bf0
+STEP 13/14: ENV "OPENSHIFT_BUILD_NAME"="safe-agents-broker-base-1" "OPENSHIFT_BUILD_NAMESPACE"="safe-agents"
+--> 111f57205cc4
+STEP 14/14: LABEL "io.openshift.build.name"="safe-agents-broker-base-1" "io.openshift.build.namespace"="safe-agents"
+COMMIT temp.builder.openshift.io/safe-agents/safe-agents-broker-base-1:ed2cc050
+--> 862940e285d5
+Successfully tagged temp.builder.openshift.io/safe-agents/safe-agents-broker-base-1:ed2cc050
+862940e285d5e69164ef5a40ceff8a794470e8e3e9d9eb63941480504811aee9
+
+Pushing image image-registry.openshift-image-registry.svc:5000/safe-agents/safe-agents-broker-base:arc ...
+Getting image source signatures
+Copying blob sha256:584796d328014b28ad2035f72b7c45aeae8a226bec6187052cbd49adf46b7633
+Copying blob sha256:5a31db4cd47898e862a567028aa41f7a11d814cf69be6904173402a8b8eac5cb
+Copying blob sha256:2128e6768943730437115c76188252d82a7ef34e21f31b4d73036aa6c4f7d8df
+Copying blob sha256:b3c7a9bdb4f2a30d0a1358438d1539c06b86da99135cfd9d92756863cc87ae18
+Copying blob sha256:c85ad0bcaca895afa08053538ec1ea7642c7e9e05f5684d18e3627a2316ca8ae
+Copying blob sha256:26c307b5e35a59ce911f5fde5b9458120ec8734e831ea2da5649a9ad14abfd3d
+Copying blob sha256:521d1991f0cb0a7a2994a54e1dfbab326fb3ce013d3453de06015b80acbc9249
+Copying blob sha256:55601edda8b1a13992273305fd830da995ac737da9df27be53f2e626535614d8
+Copying blob sha256:1caf6c9c99cad89ed0092a6b6ad1b8707cc9201df7e47eaba9a6681ca45d5b08
+Copying blob sha256:52076ad1363bf9a395f0e984feb4391cd70a216b7b4c82b4a80a2f4f1d21c013
+Copying config sha256:862940e285d5e69164ef5a40ceff8a794470e8e3e9d9eb63941480504811aee9
+Writing manifest to image destination
+Successfully pushed image-registry.openshift-image-registry.svc:5000/safe-agents/safe-agents-broker-base@sha256:864708cdd59cbfb90b9332da96f16e23a6402d6bd9836aa2f6c4a3492345bd6c
+Push successful
+   PASS base broker image built
+Uploading directory "/Users/you/Code/safe-agents" as binary input for the build ...
+.......
+Uploading finished
+build.build.openshift.io/safe-agents-missileer-1 started
+Receiving source from STDIN as archive ...
+time="2026-08-11T04:10:39Z" level=info msg="Not using native diff for overlay, this may cause degraded performance for building images: kernel has CONFIG_OVERLAY_FS_REDIRECT_DIR enabled"
+I0811 04:10:39.368767       1 defaults.go:112] Defaulting to storage driver "overlay" with options [mountopt=metacopy=on].
+Caching blobs under "/var/cache/blobs".
+
+Pulling image image-registry.openshift-image-registry.svc:5000/safe-agents/safe-agents-broker-base:arc ...
+Trying to pull image-registry.openshift-image-registry.svc:5000/safe-agents/safe-agents-broker-base:arc...
+Getting image source signatures
+Copying blob sha256:bcef724ba256837e91e3cb3c60b91d5404b94ffc4f6eb16f73599362d1c12e9a
+Copying blob sha256:5a31db4cd47898e862a567028aa41f7a11d814cf69be6904173402a8b8eac5cb
+Copying blob sha256:b3c7a9bdb4f2a30d0a1358438d1539c06b86da99135cfd9d92756863cc87ae18
+Copying blob sha256:986853a6e9a4d3383cb0e541008673ad29926ed1fa96cdf4951e0c9f173e4a66
+Copying blob sha256:26c307b5e35a59ce911f5fde5b9458120ec8734e831ea2da5649a9ad14abfd3d
+Copying blob sha256:c85ad0bcaca895afa08053538ec1ea7642c7e9e05f5684d18e3627a2316ca8ae
+Copying blob sha256:4e0bb71900a9b951bb2b4dab7215f27f3e4a8d6163015cad413e4f1af26de872
+Copying blob sha256:1638a7166ed509af435629806e33bd0dd30a0faaaf28eb2e5ad3beab6db92ee2
+Copying blob sha256:f3c272b8d7916a52cd1e9cc00386fb003baee669306dfee5d22a8999366184b3
+Copying blob sha256:bd7e296b7a8fd57e12bbfc2a894fa41d9db3c025aa56f3b7fd1bae368d9160ee
+Copying config sha256:862940e285d5e69164ef5a40ceff8a794470e8e3e9d9eb63941480504811aee9
+Writing manifest to image destination
+Adding transient rw bind mount for /run/secrets/rhsm
+STEP 1/7: FROM image-registry.openshift-image-registry.svc:5000/safe-agents/safe-agents-broker-base:arc
+STEP 2/7: USER root
+--> 6108d157e42a
+STEP 3/7: RUN pip install --no-cache-dir 'mcp>=1.25,<2'
+Collecting mcp<2,>=1.25
+  Downloading mcp-1.29.0-py3-none-any.whl.metadata (9.3 kB)
+Collecting anyio>=4.5 (from mcp<2,>=1.25)
+  Downloading anyio-4.14.2-py3-none-any.whl.metadata (4.6 kB)
+Collecting httpx-sse>=0.4 (from mcp<2,>=1.25)
+  Downloading httpx_sse-0.4.3-py3-none-any.whl.metadata (9.7 kB)
+Collecting httpx<1.0.0,>=0.27.1 (from mcp<2,>=1.25)
+  Downloading httpx-0.28.1-py3-none-any.whl.metadata (7.1 kB)
+Collecting jsonschema>=4.20.0 (from mcp<2,>=1.25)
+  Downloading jsonschema-4.26.0-py3-none-any.whl.metadata (7.6 kB)
+Collecting pydantic-settings>=2.5.2 (from mcp<2,>=1.25)
+  Downloading pydantic_settings-2.15.0-py3-none-any.whl.metadata (3.9 kB)
+Requirement already satisfied: pydantic<3.0.0,>=2.11.0 in /usr/local/lib/python3.12/site-packages (from mcp<2,>=1.25) (2.13.4)
+Collecting pyjwt>=2.10.1 (from pyjwt[crypto]>=2.10.1->mcp<2,>=1.25)
+  Downloading pyjwt-2.13.0-py3-none-any.whl.metadata (3.4 kB)
+Collecting python-multipart>=0.0.9 (from mcp<2,>=1.25)
+  Downloading python_multipart-0.0.32-py3-none-any.whl.metadata (2.1 kB)
+Collecting sse-starlette>=1.6.1 (from mcp<2,>=1.25)
+  Downloading sse_starlette-3.4.8-py3-none-any.whl.metadata (15 kB)
+Collecting starlette>=0.27 (from mcp<2,>=1.25)
+  Downloading starlette-1.6.0-py3-none-any.whl.metadata (6.4 kB)
+Requirement already satisfied: typing-extensions>=4.9.0 in /usr/local/lib/python3.12/site-packages (from mcp<2,>=1.25) (4.16.0)
+Requirement already satisfied: typing-inspection>=0.4.1 in /usr/local/lib/python3.12/site-packages (from mcp<2,>=1.25) (0.4.3)
+Collecting uvicorn>=0.31.1 (from mcp<2,>=1.25)
+  Downloading uvicorn-0.52.1-py3-none-any.whl.metadata (6.6 kB)
+Collecting idna>=2.8 (from anyio>=4.5->mcp<2,>=1.25)
+  Downloading idna-3.18-py3-none-any.whl.metadata (6.1 kB)
+Collecting certifi (from httpx<1.0.0,>=0.27.1->mcp<2,>=1.25)
+  Downloading certifi-2026.7.22-py3-none-any.whl.metadata (2.5 kB)
+Collecting httpcore==1.* (from httpx<1.0.0,>=0.27.1->mcp<2,>=1.25)
+  Downloading httpcore-1.0.9-py3-none-any.whl.metadata (21 kB)
+Collecting h11>=0.16 (from httpcore==1.*->httpx<1.0.0,>=0.27.1->mcp<2,>=1.25)
+  Downloading h11-0.16.0-py3-none-any.whl.metadata (8.3 kB)
+Collecting attrs>=22.2.0 (from jsonschema>=4.20.0->mcp<2,>=1.25)
+  Downloading attrs-26.1.0-py3-none-any.whl.metadata (8.8 kB)
+Collecting jsonschema-specifications>=2023.03.6 (from jsonschema>=4.20.0->mcp<2,>=1.25)
+  Downloading jsonschema_specifications-2025.9.1-py3-none-any.whl.metadata (2.9 kB)
+Collecting referencing>=0.28.4 (from jsonschema>=4.20.0->mcp<2,>=1.25)
+  Downloading referencing-0.37.0-py3-none-any.whl.metadata (2.8 kB)
+Collecting rpds-py>=0.25.0 (from jsonschema>=4.20.0->mcp<2,>=1.25)
+  Downloading rpds_py-2026.6.3-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl.metadata (4.1 kB)
+Requirement already satisfied: annotated-types>=0.6.0 in /usr/local/lib/python3.12/site-packages (from pydantic<3.0.0,>=2.11.0->mcp<2,>=1.25) (0.8.0)
+Requirement already satisfied: pydantic-core==2.46.4 in /usr/local/lib/python3.12/site-packages (from pydantic<3.0.0,>=2.11.0->mcp<2,>=1.25) (2.46.4)
+Collecting python-dotenv>=0.21.0 (from pydantic-settings>=2.5.2->mcp<2,>=1.25)
+  Downloading python_dotenv-1.2.2-py3-none-any.whl.metadata (27 kB)
+Requirement already satisfied: cryptography>=3.4.0 in /usr/local/lib/python3.12/site-packages (from pyjwt[crypto]>=2.10.1->mcp<2,>=1.25) (50.0.0)
+Collecting click>=7.0 (from uvicorn>=0.31.1->mcp<2,>=1.25)
+  Downloading click-8.4.2-py3-none-any.whl.metadata (2.6 kB)
+Requirement already satisfied: cffi>=2.0.0 in /usr/local/lib/python3.12/site-packages (from cryptography>=3.4.0->pyjwt[crypto]>=2.10.1->mcp<2,>=1.25) (2.1.1)
+Requirement already satisfied: pycparser in /usr/local/lib/python3.12/site-packages (from cffi>=2.0.0->cryptography>=3.4.0->pyjwt[crypto]>=2.10.1->mcp<2,>=1.25) (3.0)
+Downloading mcp-1.29.0-py3-none-any.whl (223 kB)
+Downloading anyio-4.14.2-py3-none-any.whl (125 kB)
+Downloading httpx-0.28.1-py3-none-any.whl (73 kB)
+Downloading httpcore-1.0.9-py3-none-any.whl (78 kB)
+Downloading httpx_sse-0.4.3-py3-none-any.whl (9.0 kB)
+Downloading jsonschema-4.26.0-py3-none-any.whl (90 kB)
+Downloading pydantic_settings-2.15.0-py3-none-any.whl (69 kB)
+Downloading pyjwt-2.13.0-py3-none-any.whl (31 kB)
+Downloading python_multipart-0.0.32-py3-none-any.whl (30 kB)
+Downloading sse_starlette-3.4.8-py3-none-any.whl (16 kB)
+Downloading starlette-1.6.0-py3-none-any.whl (75 kB)
+Downloading uvicorn-0.52.1-py3-none-any.whl (79 kB)
+Downloading attrs-26.1.0-py3-none-any.whl (67 kB)
+Downloading click-8.4.2-py3-none-any.whl (119 kB)
+Downloading h11-0.16.0-py3-none-any.whl (37 kB)
+Downloading idna-3.18-py3-none-any.whl (65 kB)
+Downloading jsonschema_specifications-2025.9.1-py3-none-any.whl (18 kB)
+Downloading python_dotenv-1.2.2-py3-none-any.whl (22 kB)
+Downloading referencing-0.37.0-py3-none-any.whl (26 kB)
+Downloading rpds_py-2026.6.3-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl (366 kB)
+Downloading certifi-2026.7.22-py3-none-any.whl (136 kB)
+Installing collected packages: rpds-py, python-multipart, python-dotenv, pyjwt, idna, httpx-sse, h11, click, certifi, attrs, uvicorn, referencing, httpcore, anyio, starlette, pydantic-settings, jsonschema-specifications, httpx, sse-starlette, jsonschema, mcp
+Successfully installed anyio-4.14.2 attrs-26.1.0 certifi-2026.7.22 click-8.4.2 h11-0.16.0 httpcore-1.0.9 httpx-0.28.1 httpx-sse-0.4.3 idna-3.18 jsonschema-4.26.0 jsonschema-specifications-2025.9.1 mcp-1.29.0 pydantic-settings-2.15.0 pyjwt-2.13.0 python-dotenv-1.2.2 python-multipart-0.0.32 referencing-0.37.0 rpds-py-2026.6.3 sse-starlette-3.4.8 starlette-1.6.0 uvicorn-0.52.1
+WARNING: Running pip as the 'root' user can result in broken permissions and conflicting behaviour with the system package manager, possibly rendering your system unusable. It is recommended to use a virtual environment instead: https://pip.pypa.io/warnings/venv. Use the --root-user-action option if you know what you are doing and want to suppress this warning.
+
+[notice] A new release of pip is available: 25.0.1 -> 26.2.1
+[notice] To update, run: pip install --upgrade pip
+--> 53c44b2802de
+STEP 4/7: COPY --chown=broker:broker examples/restricted_mcp_server/server.py examples/restricted_mcp_server/manifest.yaml /app/examples/restricted_mcp_server/
+--> 9faffb68e5b8
+STEP 5/7: USER broker
+--> 3e8610b467d7
+STEP 6/7: ENV "OPENSHIFT_BUILD_NAME"="safe-agents-missileer-1" "OPENSHIFT_BUILD_NAMESPACE"="safe-agents"
+--> 22776803004a
+STEP 7/7: LABEL "io.openshift.build.name"="safe-agents-missileer-1" "io.openshift.build.namespace"="safe-agents"
+COMMIT temp.builder.openshift.io/safe-agents/safe-agents-missileer-1:d9bb4a52
+--> 92f361fcafb4
+Successfully tagged temp.builder.openshift.io/safe-agents/safe-agents-missileer-1:d9bb4a52
+92f361fcafb431d98b88a7bb2c7486f08e5cdf8cc908882ff97ad01921ad7cc4
+
+Pushing image image-registry.openshift-image-registry.svc:5000/safe-agents/safe-agents-missileer:arc ...
+Getting image source signatures
+Copying blob sha256:bcef724ba256837e91e3cb3c60b91d5404b94ffc4f6eb16f73599362d1c12e9a
+Copying blob sha256:26c307b5e35a59ce911f5fde5b9458120ec8734e831ea2da5649a9ad14abfd3d
+Copying blob sha256:b3c7a9bdb4f2a30d0a1358438d1539c06b86da99135cfd9d92756863cc87ae18
+Copying blob sha256:c85ad0bcaca895afa08053538ec1ea7642c7e9e05f5684d18e3627a2316ca8ae
+Copying blob sha256:986853a6e9a4d3383cb0e541008673ad29926ed1fa96cdf4951e0c9f173e4a66
+Copying blob sha256:5a31db4cd47898e862a567028aa41f7a11d814cf69be6904173402a8b8eac5cb
+Copying blob sha256:4e0bb71900a9b951bb2b4dab7215f27f3e4a8d6163015cad413e4f1af26de872
+Copying blob sha256:1638a7166ed509af435629806e33bd0dd30a0faaaf28eb2e5ad3beab6db92ee2
+Copying blob sha256:f3c272b8d7916a52cd1e9cc00386fb003baee669306dfee5d22a8999366184b3
+Copying blob sha256:bd7e296b7a8fd57e12bbfc2a894fa41d9db3c025aa56f3b7fd1bae368d9160ee
+Copying blob sha256:4e0c583a5993ff3f7457666118eac7f532e49e0340b8bbf9220cab9ab754f2ca
+Copying blob sha256:0555f79f83f0d3ef2eb1c480234043f2cc681423f7776de456b05fbe2a6f1323
+Copying config sha256:92f361fcafb431d98b88a7bb2c7486f08e5cdf8cc908882ff97ad01921ad7cc4
+Writing manifest to image destination
+Successfully pushed image-registry.openshift-image-registry.svc:5000/safe-agents/safe-agents-missileer@sha256:99e80f54ee4d3a143c5965ba3859c198a33b37f35204eab0efabfa94002c5dc0
+Push successful
+   PASS missileer consumer image built on that base
+
+== 4. leg zero — bootstrap the grant store, as the checker ServiceAccount
+
+   ---- checker / bootstrap (safe-agents-bootstrap-7hdh2) ----
+   
+   == 0. identity — the checker credential, before any proposal exists
+      uid=1000880000  pod=safe-agents-bootstrap-7hdh2
+      SelfSubjectReview says: system:serviceaccount:safe-agents:safe-agents-checker
+      PASS identity derived from the cluster, never asserted
+   
+   == 0b. the shim — a private copy of the projected issuer key
+      projected: mode=644 owner=0:1000880000
+      PASS issuer key staged 0600, owned by uid 1000880000
+   
+   == 1. the two key spaces are two files, and this leg may write both
+      work   (rw): /var/lib/broker/broker.db
+      grants (rw): /var/lib/broker-grants/grants.db
+      PASS two distinct database paths
+   
+   == 2. seed — the bootstrap ceremony, under the signing identity
+   [seed] OK   ledger.get_entry: grant + bootstrap record written; read back un-quarantined
+   [seed] OK   ledger.list_entries: grant + bootstrap record written; read back un-quarantined
+   [seed] OK   peer.publish: grant + bootstrap record written; read back un-quarantined
+   [seed] seededBy=system:serviceaccount:safe-agents:safe-agents-checker: 3 created, 0 skipped, 0 failed
+      PASS grants seeded and their bootstrap records signed
+   
+   == 3. the grant store exists, with a rollback journal
+      journal_mode=delete  GRANT# rows=3
+      PASS grant store bootstrapped and openable from a read-only mount
+   
+   BOOTSTRAP COMPLETE — the maker may now propose against a store it cannot write.
+
+   scc=restricted-v2 runAsUser=1000880000 phase=Succeeded
+   PASS checker / bootstrap succeeded under restricted-v2 as uid 1000880000
+
+== 5. leg one — propose, as the maker ServiceAccount
+
+   ---- maker / propose (safe-agents-propose-nl5ns) ----
+   
+   == 0. identity — derived by asking the authority
+      uid=1000880000  pod=safe-agents-propose-nl5ns
+      SelfSubjectReview says: system:serviceaccount:safe-agents:safe-agents-maker
+      PASS identity derived from the cluster, never asserted
+   
+   == 0b. NEGATIVE PROOF — the solo arm is refused where a real identity exists
+      the solo ceremony arm              -> rc=1 safe_agents.broker.prototype.boot_config.BrokerConfigError: BROKER_LOCAL_IDENTITY='maker' is set
+      control: the serviceaccount arm still resolves -> ok
+      PASS solo attestation refused where a real identity exists
+   
+   == 1. NEGATIVE PROOF — what this credential cannot do
+      read the issuer signing key: HTTP 403 — REFUSED by RBAC
+      create a pod that would mount it: HTTP 403 — REFUSED by RBAC
+      PASS the maker can neither read the key nor arrange for it to be delivered
+   
+   == 1b. and it has no issuer key mounted
+      PASS no issuer volume, no key path — this pod cannot sign a record
+   
+   == 2. snapshot — pre-admission discovery (spawns the MCP stdio child)
+   snapshot written: /var/lib/broker/snapshot.json server_id=ledger transport=stdio tools=2
+      PASS live tool set captured
+   
+   == 3. admit-propose, under the maker ServiceAccount
+   --- review: admitted (if any) vs. proposed ---
+   === get_entry ===
+     status: NEW — live but not admitted (no registry row)
+     advertised metadata (signed — covered by def_hash):
+       output_schema: {'description': 'One structured ledger row — typed, schema-bounded output (not free text).', 'properties': {'entry_id': {'title': 'Entry Id', 'type': 'string'}, 'account': {'title': 'Account', 'type': 'string'}, 'memo': {'title': 'Memo', 'type': 'string'}, 'amount': {'title': 'Amount', 'type': 'string'}}, 'required': ['entry_id', 'account', 'memo', 'amount'], 'title': 'LedgerEntry', 'type': 'object'}
+     --- proposed definition (verbatim; no prior admission to compare against) ---
+     input_schema: {'properties': {'entry_id': {'title': 'Entry Id', 'type': 'string'}}, 'required': ['entry_id'], 'title': 'get_entryArguments', 'type': 'object'}
+     description:
+   Return one ledger entry by id. Read-only; structured output.
+   --- end review ---
+   proposal stored: proposal_id=1172a69f-d022-4500-ac66-5dac2bc29539 kind=admission ledger/get_entry def_hash=a4ba3981845f15f89fd129cdf3de5599e4c8f546dca76d941734aa26401acfbe expires_at=2026-08-11T05:11:27.354509+00:00
+   proposedBy=system:serviceaccount:safe-agents:safe-agents-maker
+      PASS proposal 1172a69f-d022-4500-ac66-5dac2bc29539
+   
+   == 4. NEGATIVE PROOF — the maker's ratify dies at the SIGNING gate
+      the maker's own ratify             -> rc=1 REFUSED: issuer signing key not configured — an admission record mints callability, so it must
+      PASS refused at M8 before reaching M7: no key, therefore no valid ratification
+   
+   == 5. NEGATIVE PROOF — the maker cannot WRITE the grant store
+      work   (expected rw): /var/lib/broker/broker.db
+      grants (expected ro): /var/lib/broker-grants/grants.db
+      control: this pod CAN write to the working mount -> ok
+      touch a file in the grant dir      -> rc=1 touch: cannot touch '/var/lib/broker-grants/forged': Read-only file system
+      PASS the grant volume is a read-only mount: refused by the kernel with EROFS
+      sqlite INSERT of a GRANT# row -> refused: attempt to write a readonly database
+      PASS a forged GRANT# row is refused by the platform, not by our ConditionExpression
+      GRANT# rows readable by the maker: 3
+      PASS evidence reads still succeed — write-denied, not read-denied
+   
+   MAKER LEG: PASS — proposed under a derived ServiceAccount identity,
+   holding no signing key and unable to obtain one.
+
+   scc=restricted-v2 runAsUser=1000880000 phase=Succeeded
+   PASS maker / propose succeeded under restricted-v2 as uid 1000880000
+
+== 6. leg two — ratify, as the checker ServiceAccount
+
+   ---- checker / ratify (safe-agents-ratify-pxbcx) ----
+   
+   == 0. identity — a DIFFERENT credential, in a different pod
+      uid=1000880000  pod=safe-agents-ratify-pxbcx
+      SelfSubjectReview says: system:serviceaccount:safe-agents:safe-agents-checker
+      PASS identity derived from the cluster, never asserted
+   
+   == 0b. the shim — a private copy of the projected issuer key
+      projected: mode=644 owner=0:1000880000
+      private:   mode=600 owner=1000880000:1000880000
+      PASS issuer key staged 0600, owned by uid 1000880000
+   
+   == 1. the grant store this leg may write, and the maker could not
+      grants (rw here): /var/lib/broker-grants/grants.db
+      writer lock acquired; GRANT# rows present: 3
+      PASS the checker holds the writer lock the maker was refused
+   
+   == 2. the maker's proposal, from the shared volume
+      proposal_id=1172a69f-d022-4500-ac66-5dac2bc29539
+   
+   == 3. admit-ratify — burn the proposal, sign the record, write the row
+   ADMITTED: admission ledger/get_entry -> ACTIVE
+   record: recordType=admission def_hash=a4ba3981845f15f89fd129cdf3de5599e4c8f546dca76d941734aa26401acfbe ts=2026-08-11T04:11:45.606839+00:00 proposedBy=system:serviceaccount:safe-agents:safe-agents-maker ratifiedBy=system:serviceaccount:safe-agents:safe-agents-checker signed=yes (issuer DSSE)
+      PASS ledger/get_entry ADMITTED
+   
+   == 4. what the signed record says about who ran this
+      proposedBy:  system:serviceaccount:safe-agents:safe-agents-maker
+      ratifiedBy:  system:serviceaccount:safe-agents:safe-agents-checker
+      attestation: None
+      signature:   present (issuer DSSE)
+      PASS two distinct ServiceAccounts, signed, and NO solo attestation
+   
+   == 5. NEGATIVE PROOF — M7, reached this time
+      the checker proposed list_entries itself: 04c5ef1e-097b-4eed-abd6-e8d70330ea20
+      REFUSED: maker == checker — the same ceremony identity (system:serviceaccount:safe-agents:safe-agents-checker) proposed and is ratifying this admission. Admission requi
+      PASS one credential cannot be both halves, even holding the signing key (M7)
+   
+   CHECKER LEG: PASS — ratified under a second credential the maker
+   could not have obtained, and the record says so without a solo caveat.
+
+   scc=restricted-v2 runAsUser=1000880000 phase=Succeeded
+   PASS checker / ratify succeeded under restricted-v2 as uid 1000880000
+
+== 7. leg three — serve, as the broker ServiceAccount
+
+   ---- serve / durability (safe-agents-serve-nfkbl) ----
+   
+   == 0. this is a different pod
+      hostname=safe-agents-serve-nfkbl  uid=1000880000
+   
+   == 1. this pod could not have produced what it is about to read
+      this pod runs as: system:serviceaccount:safe-agents:safe-agents-broker
+      issuer key mounted here: no — it cannot sign anything
+      PASS whatever signed the record on this volume, it was not this pod
+   
+   == 1b. and the ceremony ran in pods that are gone
+      bootstrap ran in pod safe-agents-bootstrap-7hdh2 as system:serviceaccount:safe-agents:safe-agents-checker
+      propose  ran in pod safe-agents-propose-nl5ns as system:serviceaccount:safe-agents:safe-agents-maker
+      ratify   ran in pod safe-agents-ratify-pxbcx as system:serviceaccount:safe-agents:safe-agents-checker
+      PASS every ceremony leg ran in a pod that is not this one
+   
+   == 2. what was already on the PVC before this pod started
+      2 rows in the work store (/var/lib/broker/broker.db)
+      8 rows in the grants store (/var/lib/broker-grants/grants.db)
+      10 rows found on the PVC in total
+        proposedBy=system:serviceaccount:safe-agents:safe-agents-checker   [RECORD#ledger-reader#reader#bookkeeping-consumer#B#ledger.get_entry | 2026-08-11T04:11:08.242310+00:00#bootstrap]
+        ratifiedBy=system:serviceaccount:safe-agents:safe-agents-checker   [RECORD#ledger-reader#reader#bookkeeping-consumer#B#ledger.get_entry | 2026-08-11T04:11:08.242310+00:00#bootstrap]
+        proposedBy=system:serviceaccount:safe-agents:safe-agents-checker   [RECORD#ledger-reader#reader#bookkeeping-consumer#B#ledger.list_entries | 2026-08-11T04:11:08.242310+00:00#bootstrap]
+        ratifiedBy=system:serviceaccount:safe-agents:safe-agents-checker   [RECORD#ledger-reader#reader#bookkeeping-consumer#B#ledger.list_entries | 2026-08-11T04:11:08.242310+00:00#bootstrap]
+        proposedBy=system:serviceaccount:safe-agents:safe-agents-checker   [RECORD#ledger-reader#reader#bookkeeping-consumer#B#peer.publish | 2026-08-11T04:11:08.242310+00:00#bootstrap]
+        ratifiedBy=system:serviceaccount:safe-agents:safe-agents-checker   [RECORD#ledger-reader#reader#bookkeeping-consumer#B#peer.publish | 2026-08-11T04:11:08.242310+00:00#bootstrap]
+        proposedBy=system:serviceaccount:safe-agents:safe-agents-maker   [TOOLREC#ledger#get_entry | 2026-08-11T04:11:45.606839+00:00]
+        ratifiedBy=system:serviceaccount:safe-agents:safe-agents-checker   [TOOLREC#ledger#get_entry | 2026-08-11T04:11:45.606839+00:00]
+      this pod's credential is system:serviceaccount:safe-agents:safe-agents-broker,
+      which appears nowhere in the attribution above.
+      PASS the PVC carries a ceremony run by credentials this pod does not hold
+   
+   == 3. a fresh broker process serves the already-ratified grant
+      BROKER_GRANT_LOAD=read
+   /usr/local/lib/python3.12/site-packages/pydantic_settings/sources/utils.py:47: IncompleteFieldDefinitionWarning: Field 'lifespan' has an incomplete definition: its annotation contains an unresolved forward reference, so settings sources may fail to correctly resolve its value. Call `model_rebuild()` on the model where the field is defined, once all the referenced types are defined.
+     warnings.warn(
+   Processing request of type ListToolsRequest
+   Processing request of type CallToolRequest
+   [broker] envelope load mode: manifest
+   [broker] store backend: sqlite (/var/lib/broker/broker.db)
+   [broker] audit sink: file (/var/lib/broker-audit/audit.jsonl); secrets: dir (/run/connector-secrets)
+   [broker] grant load mode: read
+      ledger.get_entry -> allow
+      result: meta=None content=[TextContent(type='text', text='{\n  "entry_id": "L-001",\n  "account": "cash",\n 
+      ledger.list_entries -> deny (still never admitted)
+      PASS the first pod's ceremony output served by a second pod, no ceremony re-run
+   
+   == 4. and those two decisions are on the audit tape, on its own mount
+      tape: /var/lib/broker-audit/audit.jsonl
+      seq=0 ledger.get_entry decision=allow outcome=executed
+      seq=1 ledger.list_entries decision=allow outcome=refused
+      verify_chain over 2 records: intact
+      PASS the writer leg appends to its own mount and the chain verifies
+   
+   PVC DURABILITY: PASS — the store outlived the pod that wrote it,
+   and the decisions it served are on a tape no ceremony leg can reach.
+
+   scc=restricted-v2 runAsUser=1000880000 phase=Succeeded
+   PASS serve / durability succeeded under restricted-v2 as uid 1000880000
+
+== 8. leg four — the audit tamper attempt, back as the maker
+
+   ---- maker / audit tamper (safe-agents-tamper-qr72z) ----
+   
+   == 0. identity — the least-privileged ceremony credential
+      uid=1000880000  pod=safe-agents-tamper-qr72z
+      SelfSubjectReview says: system:serviceaccount:safe-agents:safe-agents-maker
+      PASS running as the maker — the credential already excluded from the grant store
+   
+   == 0b. CONTROL — this pod CAN write, so a refusal below means something
+      control: this pod CAN write to the working mount -> ok
+      PASS the working mount is writable by this pod; the audit mount is the variable under test
+   
+   == 1. what is on the tape, and who put it there
+      given: the tape exists and is non-empty
+      -rw-rw-r--. 1 1000880000 1000880000 1569 Aug 11 04:12 /var/lib/broker-audit/audit.jsonl
+      sha256 before: 2fb8fb7345a557684bd683f484bff210539fed1d4b0fd02f75db78388cc1c677
+      seq=0 ledger.get_entry decision=allow outcome=executed principal=ledger-reader
+      seq=1 ledger.list_entries decision=allow outcome=refused principal=ledger-reader
+      2 records, written by the broker leg — not by system:serviceaccount:safe-agents:safe-agents-maker
+      PASS a populated tape, written by a credential this pod does not hold
+   
+   == 2. NEGATIVE PROOF — every way to erase or forge, attempted
+      truncate the tape                  -> rc=1 OSError: [Errno 30] Read-only file system: '/var/lib/broker-audit/audit.jsonl'
+      append a forged record             -> rc=1 OSError: [Errno 30] Read-only file system: '/var/lib/broker-audit/audit.jsonl'
+      unlink the tape                    -> rc=1 rm: cannot remove '/var/lib/broker-audit/audit.jsonl': Read-only file system
+      write a replacement file           -> rc=1 touch: cannot touch '/var/lib/broker-audit/audit.jsonl.new': Read-only file system
+      PASS all four refused by the kernel with EROFS, on a read-only mount — not by a check of ours
+   
+   == 3. the tape is byte-identical to what it was before those attempts
+      sha256 after:  2fb8fb7345a557684bd683f484bff210539fed1d4b0fd02f75db78388cc1c677
+      PASS not one byte moved
+   
+   == 4. the chain verifies, checked by something that is not the sink that wrote it
+      verify_chain over 2 records: intact (seq 0..1, unkeyed SHA-256, no credential used)
+      PASS an intact chain, verified without the writer and without a key
+   
+   AUDIT SPLIT: PASS — a ceremony leg cannot forge or erase another
+   leg's records. It does NOT follow that the tape survives a compromised broker:
+   the writer can still rewrite its own tail and re-chain it, and this leg proves
+   nothing about that case.
+
+   scc=restricted-v2 runAsUser=1000880000 phase=Succeeded
+   PASS maker / audit tamper succeeded under restricted-v2 as uid 1000880000
+
+== 9. Phase 4 — the broker as a SERVING workload, not an in-process runtime
+Waiting for deployment "safe-agents-broker" rollout to finish: 0 out of 1 new replicas have been updated...
+Waiting for deployment "safe-agents-broker" rollout to finish: 0 out of 1 new replicas have been updated...
+Waiting for deployment "safe-agents-broker" rollout to finish: 0 out of 1 new replicas have been updated...
+Waiting for deployment "safe-agents-broker" rollout to finish: 0 of 1 updated replicas are available...
+deployment "safe-agents-broker" successfully rolled out
+   pod=safe-agents-broker-58dc9cf76-d684j scc=restricted-v2
+   PASS the broker serves /call under restricted-v2, and kubelet probes reach it through the ingress policy
+
+== 10. leg five — the AGENT pod, a fourth ServiceAccount holding nothing
+
+   ---- agent / Phase 4 predicate (safe-agents-agent-hg2p4) ----
+   
+   == 0. what this pod is
+      pod=safe-agents-agent-hg2p4  uid=1000880000  broker=http://safe-agents-broker.safe-agents.svc:8080
+      PASS no connector secrets, no issuer key, no store, no audit tape in this pod
+   
+   == 1. the SCC constrains what this pod may do at all
+      CapEff=0000000000000000
+      control: an ordinary TCP socket opens -> ok
+      open a raw ICMP socket             -> rc=1 PermissionError: [Errno 1] Operation not permitted
+      PASS zero capabilities; a raw socket is refused by the kernel with EPERM, an ordinary one is not
+   
+   == 2. direct external egress is DENIED
+      control: api.github.com RESOLVES to 140.82.114.6 — DNS is working
+      140.82.114.6:443 (api.github.com) -> TIMEOUT  TimeoutError: timed out after 8.0s
+      1.1.1.1:443 (no DNS in the path) -> TIMEOUT  TimeoutError: timed out after 8.0s
+      PASS external names resolve, and every connection to them is dropped by the policy
+   
+   == 3. reading the broker's Secret is DENIED
+      control: SelfSubjectReview -> HTTP 201, the API server says I am system:serviceaccount:safe-agents:safe-agents-agent
+      GET secret/safe-agents-connector-secrets -> HTTP 403
+          secrets "safe-agents-connector-secrets" is forbidden: User "system:serviceaccount:safe-agents:safe-agents-agent" cannot get resource "secrets" in API group "" i
+      GET secret/safe-agents-issuer -> HTTP 403
+          secrets "safe-agents-issuer" is forbidden: User "system:serviceaccount:safe-agents:safe-agents-agent" cannot get resource "secrets" in API group "" in the names
+      POST a pod that MOUNTS secret/safe-agents-issuer -> HTTP 403
+          pods is forbidden: User "system:serviceaccount:safe-agents:safe-agents-agent" cannot create resource "pods" in API group "" in the namespace "safe-agents"
+      PASS the API server answers this pod, and refuses it the Secret AND the pod that would mount it
+   
+   == 4. and a brokered call STILL EXECUTES — the positive control for all of the above
+      POST /call ledger.get_entry -> HTTP 200, decision=allow
+      result: {'meta': None, 'content': [{'type': 'text', 'text': '{\n  "entry_id": "L-001",\n  "account": "cash",\n  "memo": "opening
+      POST /call ledger.list_entries -> HTTP 200, decision=deny (never admitted)
+      PASS the agent's only reachable endpoint served it, and still refused the unadmitted op
+   
+   PHASE 4 PREDICATE: PASS — from inside this pod: external egress denied,
+   the broker Secret denied, and a brokered call executed anyway.
+   
+   What this does NOT claim, stated here rather than left to be found:
+     * NetworkPolicy is a platform boundary we ORCHESTRATE, not a sandbox we
+       implement. OVN and the kernel enforce it; no safe_agents code is in the path.
+       Nothing here constrains what the agent does INSIDE this pod.
+     * The API server is deliberately reachable from here, so that the refusal above
+       is attributable to RBAC rather than to a dropped packet. A production envelope
+       should deny both; this drill trades reach for attributability on purpose.
+     * This image contains the safe_agents SDK, because it is the same image every
+       other leg runs. That buys the agent nothing — it holds no credential, no
+       connector secret and no mount, which is the point: a fully compromised agent
+       can still only ask.
+
+   scc=restricted-v2 runAsUser=1000880000 phase=Succeeded
+   PASS agent / Phase 4 predicate succeeded under restricted-v2 as uid 1000880000
+
+== 10b. THE CONTROL — the same refused call, with no broker in the path
+
+   ---- agent / unbrokered baseline (safe-agents-demo-baseline-zzh5j) ----
+   
+   == 0. the same contained pod every other agent leg runs in
+      pod=safe-agents-demo-baseline-zzh5j  uid=1000880000  CapEff=0000000000000000
+      PASS non-root, no credential mount — the control runs under the same constraints as the proof
+   
+   == 1. THE HARM — no broker in the path, and the call simply works
+   /usr/local/lib/python3.12/site-packages/pydantic_settings/sources/utils.py:47: IncompleteFieldDefinitionWarning: Field 'lifespan' has an incomplete definition: its annotation contains an unresolved forward reference, so settings sources may fail to correctly resolve its value. Call `model_rebuild()` on the model where the field is defined, once all the referenced types are defined.
+     warnings.warn(
+   Processing request of type ListToolsRequest
+   Processing request of type CallToolRequest
+      the server advertises: ['get_entry', 'list_entries']
+      CALLED list_entries directly -> {'entry_ids': ['L-001', 'L-002', 'L-003'], 'total': 3}
+      no credential was needed, no permission was asked, nothing objected.
+      PASS the forbidden call SUCCEEDED with no broker in the path — this is the harm, and it is real
+   
+   == 2. THE SAME CALL, through the broker
+      POST /call ledger.list_entries -> HTTP 200, decision=deny
+      control: POST /call ledger.get_entry -> HTTP 200, decision=allow
+      PASS the same op is refused through the broker, while a different op executes — it is ADMISSION that refuses, not a dead broker
+   
+   UNBROKERED BASELINE: PASS — the forbidden call succeeds without the
+   broker and is refused through it, from one pod, in one run.
+   
+   What this does NOT show, stated here rather than left to be found:
+     * A CREDENTIAL being bypassed. The ledger server needs none, so this leg is
+       about the ADMISSION half only. That the agent pod holds no connector secret
+       and is refused it by RBAC is leg five, and the two claims compose rather
+       than substitute.
+     * A COMPROMISED server. `examples/restricted_mcp_server/` is the missileer
+       archetype and has no dangerous op at all. `list_entries` is an ordinary,
+       legitimate tool — which is the point: what makes it uncallable through the
+       broker is that nobody ratified it, not that it is missing.
+     * REAL harm. The blast radius is a fictional ledger, deliberately. What is
+       real is the mechanism: two-key admission is the only thing standing between
+       the agent and a tool the server is genuinely serving.
+
+   scc=restricted-v2 runAsUser=1000880000 phase=Succeeded
+   PASS agent / unbrokered baseline succeeded under restricted-v2 as uid 1000880000
+
+== 11. Phase 5 — the peer airlock endpoint comes up
+Waiting for deployment "safe-agents-peer" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "safe-agents-peer" rollout to finish: 1 old replicas are pending termination...
+Waiting for deployment "safe-agents-peer" rollout to finish: 1 old replicas are pending termination...
+deployment "safe-agents-peer" successfully rolled out
+   pod=safe-agents-peer-6c5d888bd5-pbs4b scc=restricted-v2
+   PASS the peer accepts on :8081/inbound, from the broker pod alone, under restricted-v2
+
+== 12. Phase 5 — admit a SECOND tool, so there is an untrusted read to be tainted by
+
+   ---- maker / propose list_entries (safe-agents-demo-propose-76bnk) ----
+   
+   == P1. propose ledger/list_entries, as the maker
+      identity: system:serviceaccount:safe-agents:safe-agents-maker
+   --- review: admitted (if any) vs. proposed ---
+   === list_entries ===
+     status: NEW — live but not admitted (no registry row)
+     advertised metadata (signed — covered by def_hash):
+       output_schema: {'description': 'A bounded page of entry ids — structured output for list_entries.', 'properties': {'entry_ids': {'items': {'type': 'string'}, 'title': 'Entry Ids', 'type': 'array'}, 'total': {'title': 'Total', 'type': 'integer'}}, 'required': ['entry_ids', 'total'], 'title': 'LedgerPage', 'type': 'object'}
+     --- proposed definition (verbatim; no prior admission to compare against) ---
+     input_schema: {'properties': {'limit': {'title': 'Limit', 'type': 'integer'}}, 'required': ['limit'], 'title': 'list_entriesArguments', 'type': 'object'}
+     description:
+   Return up to `limit` ledger entry ids (oldest first). Read-only; structured.
+   --- end review ---
+   proposal stored: proposal_id=95969725-281d-4192-9fa6-2abb4c3a6a44 kind=admission ledger/list_entries def_hash=cfc352b23f4584c21f98b8ba7c5d6271ffcf75b171444375404d88d6f3ec0a57 expires_at=2026-08-11T05:13:27.433999+00:00
+   proposedBy=system:serviceaccount:safe-agents:safe-agents-maker
+      PASS proposed list_entries as 95969725-281d-4192-9fa6-2abb4c3a6a44 — unsigned, and uncallable until a second credential ratifies it
+
+   scc=restricted-v2 runAsUser=1000880000 phase=Succeeded
+   PASS maker / propose list_entries succeeded under restricted-v2 as uid 1000880000
+
+   ---- checker / ratify list_entries (safe-agents-demo-ratify-q7pp5) ----
+   
+   == P2. ratify ledger/list_entries, as the checker
+      identity: system:serviceaccount:safe-agents:safe-agents-checker
+      issuer key staged mode=600 owner=1000880000:1000880000
+      burning proposal 95969725-281d-4192-9fa6-2abb4c3a6a44
+   ADMITTED: admission ledger/list_entries -> ACTIVE
+   record: recordType=admission def_hash=cfc352b23f4584c21f98b8ba7c5d6271ffcf75b171444375404d88d6f3ec0a57 ts=2026-08-11T04:13:37.455532+00:00 proposedBy=system:serviceaccount:safe-agents:safe-agents-maker ratifiedBy=system:serviceaccount:safe-agents:safe-agents-checker signed=yes (issuer DSSE)
+      PASS ledger/list_entries ADMITTED by a credential that did not propose it
+   
+      maker≠checker held across BOTH admissions in this namespace: the
+      proposer could not sign, and this pod could not have proposed.
+
+   scc=restricted-v2 runAsUser=1000880000 phase=Succeeded
+   PASS checker / ratify list_entries succeeded under restricted-v2 as uid 1000880000
+Waiting for deployment "safe-agents-broker" rollout to finish: 0 of 1 updated replicas are available...
+deployment "safe-agents-broker" successfully rolled out
+   PASS list_entries admitted by two credentials; the broker rebooted onto the new registry
+
+== 13. DEMONSTRATION 2 — a read of hostile content escalates a later write
+
+   ---- agent / taint escalation (safe-agents-demo-taint-d9ztr) ----
+   
+   == 0. this pod holds nothing that could publish on its own
+      broker: http://safe-agents-broker.safe-agents.svc:8080
+      peer:   http://safe-agents-peer.safe-agents.svc:8081 (the agent knows the NAME, holds no token for it)
+      PASS no connector secret, no peer token, no store
+   
+   == 1. THE WHOLE DEMONSTRATION — one turn, three calls, two verdicts
+      A1. ledger.get_entry (TRUSTED read) -> allow
+      A2. peer.publish on a CLEAN turn -> allow
+          result: {"status": "published", "event_id": "demo-2cefff3b-e1c9-4e21-a7db-e1e7ff371731", "principal": "ledger-reader", "http_status": 200}
+      B.  ledger.list_entries (UNTRUSTED read) -> allow
+      C.  peer.publish on a TAINTED turn -> require_approval
+          reason: 
+          intent_id: intent-e8f64ab342edbf21
+   
+      the same op, the same args shape, the same credential, one turn:
+        after a TRUSTED read   -> allow
+        after an UNTRUSTED read -> require_approval
+      the only thing that changed between them is what the turn had read.
+      PASS the same external write flowed on a clean turn and escalated on a tainted one
+   
+   == 2. and the agent cannot simply publish to the peer ITSELF
+      control: the agent CAN still reach its broker -> ok
+      POST the peer receiver directly    -> rc=1 URLError: <urlopen error timed out>
+      PASS the broker is the only way this agent reaches the peer at all
+   
+   DEMONSTRATION 2: PASS — a read of hostile content escalated a later
+   write, live, on the deployed broker.
+   
+   The limits, in the same breath:
+     * Taint is SOURCE-based, never model-judged. Nothing here decided the content
+       looked malicious — an ordinary ledger listing taints exactly as a hostile one
+       would, because the classification is a code-resident ToolOp fact.
+     * The escalation is require_approval, NOT a deny. The grant is on-loop and a
+       human is reachable; the same cut denies where one is not. Which of those is
+       safe is polarity-dependent and re-derived per agent, never in the base.
+     * The published envelope is AGENT-AUTHORED. The /call path does not call
+       stamp_outbound, so the provenance chain the peer printed proves
+       nothing; this demonstration rests on the verdict, which never reads it.
+
+   scc=restricted-v2 runAsUser=1000880000 phase=Succeeded
+   PASS agent / taint escalation succeeded under restricted-v2 as uid 1000880000
+
+== 13b. the same story from the BROKER's tape, which the agent cannot reach
+     seq=0  ledger.get_entry     decision=allow            outcome=executed  reason=None
+     seq=1  ledger.list_entries  decision=allow            outcome=refused   reason=None
+     seq=2  ledger.get_entry     decision=allow            outcome=executed  reason=None
+     seq=3  ledger.list_entries  decision=allow            outcome=refused   reason=None
+     seq=4  ledger.list_entries  decision=allow            outcome=refused   reason=None
+     seq=5  ledger.get_entry     decision=allow            outcome=executed  reason=None
+     seq=6  ledger.get_entry     decision=allow            outcome=executed  reason=None
+     seq=7  peer.publish         decision=allow            outcome=executed  reason=None
+     seq=8  ledger.list_entries  decision=allow            outcome=executed  reason=None
+     seq=9  peer.publish         decision=require_approval outcome=held      reason=tainted external write
+  
+     the broker recorded the SAME op twice: seq 7 executed, seq 9 held.
+   PASS the tape corroborates the differential, from a mount no agent pod has
+
+== 14. DEMONSTRATION 1 — the sandbox permits, the broker refuses
+
+   ---- agent / sandbox-vs-broker (safe-agents-demo-sandbox-nxgz8) ----
+   
+   == 0. the sandbox is REAL — this is not a pod with nothing switched on
+      uid=1000880000  CapEff=0000000000000000
+      control: an ordinary TCP socket opens -> ok
+      open a raw ICMP socket             -> rc=1 PermissionError: [Errno 1] Operation not permitted
+      reach the internet directly        -> rc=1 TimeoutError: timed out
+      PASS the SCC drops every capability and the NetworkPolicy drops external egress
+   
+   == 1. and inside that sandbox, the agent is FREE
+      control: write a program into its own filesystem -> ok
+      control: execute that program -> ok
+      control: spawn a subprocess -> ok
+      PASS the pod permitted the agent to author and run code that calls the broker
+   
+   == 2. THE DEMONSTRATION — the same sandbox permits, and the broker refuses
+      control: ledger.get_entry through the agent's own program -> allow
+      attempt: ledger.delete_entry — destroy a ledger record
+          sandbox: permitted the call (it is an ordinary socket to an allowed peer)
+          broker:  deny — no manifest entry for ledger.delete_entry
+      attempt: payments.transfer — move money through a connector that was never declared
+          sandbox: permitted the call (it is an ordinary socket to an allowed peer)
+          broker:  deny — no manifest entry for payments.transfer
+      PASS every forbidden action was refused by the broker, and by nothing in the sandbox
+   
+   DEMONSTRATION 1: PASS — the sandbox permitted, the broker refused.
+   
+   What this is NOT, said plainly because it is the trap:
+     * It is NOT "the broker is better than a sandbox". It is not better. It protects
+       a DIFFERENT PARTY. The sandbox kept the agent off the internet and out of the
+       kernel — real work, shown in act 0 — and had no opinion whatsoever about the
+       ledger. The broker had no opinion about /tmp. Use both.
+     * A sandbox alone would have PERMITTED every refused call above. Nothing in an
+       SCC or a NetworkPolicy knows what a ledger entry is, so there is no way to
+       express "may read entries, may not delete them" at that layer.
+     * The sandbox in this drill is the POD (SCC + NetworkPolicy), not an OpenShell
+       box. The composition claim does not depend on which sandbox — but the claim
+       must name the one actually in the picture, and this one is the platform.
+     * The dangerous op is ABSENT from the ledger server, not merely denied — the
+       missileer archetype. So the deny above is the SECOND line of defence, and the
+       first is that there is no delete tool to call.
+
+   scc=restricted-v2 runAsUser=1000880000 phase=Succeeded
+   PASS agent / sandbox-vs-broker succeeded under restricted-v2 as uid 1000880000
+
+== 15. Phase 6.1 — the posture report, generated where the containment is
+  (skipping the posture leg: not present in this tree)
+
+PHASE 3 PREDICATE: PASS
+  the ceremony ran under TWO ServiceAccounts in separate pods; the maker was
+  refused the signing key, the ability to have it delivered, AND the ability
+  to write a grant row at all — the last of these by the kernel, on a
+  read-only mount, attempted in the log rather than asserted from the
+  manifest, while its evidence reads still succeeded; the signed record
+  names two real identities and carries no solo attestation; a fourth pod
+  served the result from a store that outlived them all; and a fifth,
+  holding the maker credential, could neither erase nor forge the tape that
+  fourth pod wrote — which is a narrower claim than "the audit
+  survives a compromised broker", and deliberately so.
+
+PHASE 4 PREDICATE: PASS
+  and a SIXTH pod, under a fourth ServiceAccount holding nothing at all,
+  could not reach the internet and could not obtain the broker Secret — by
+  the network policy and by RBAC respectively, each attempted from inside
+  that pod and each naming which control refused it — while a brokered call
+  through the broker executed anyway. That last clause is the phase: two
+  denials without it are what a broken pod produces.
+
+  Rung 2 by ORCHESTRATION, and the distinction is the claim: separate
+  ServiceAccounts, OVN egress and a broker-only mount are boundaries the
+  PLATFORM enforces. No safe_agents code sits in that path, and nothing here
+  constrains what the agent does inside its own pod.
+
+PHASE 5 PREDICATE: PASS — ALL THREE DEMONSTRATIONS
+  1. the sandbox permits, the broker refuses — the agent wrote a program
+     inside a sandbox that objected to nothing, ran it, and had every forbidden
+     action refused by the BROKER and by nothing in the pod. The honest answer to
+     "why not just use OpenShell?" is that this is not better — it protects a
+     different party, and the two compose.
+  2. a read of hostile content escalates a later write — the same
+     peer.publish flowed after a TRUSTED read and escalated to require_approval
+     after an UNTRUSTED one, on one broker-held turn, with the agent unable to
+     reach the peer any other way.
+  3. a ceremony leg cannot forge or erase another leg records — four
+     kernel refusals against a populated tape, with the limit printed next to the
+     PASS (the broker can still rewrite its own).
+
+  The sandbox in demonstration 1 is the POD — SCC and NetworkPolicy — not an
+  OpenShell box [ruling: maintainer, 2026-07-28]. The composition claim does not
+  depend on which sandbox, but it must NAME the one in the picture, and wiring in
+  the EC2/AMI box would put an AWS dependency inside the cluster arm.
+
+PHASE 6.1 PREDICATE: PASS
+  and the posture report said all of it back in cluster vocabulary from inside a
+  pod — ServiceAccount, SCC, mount topology — while reporting the two
+  REFUSALS above as UNKNOWN rather than claiming them. posture makes no
+  network calls, so it cannot have attempted either; asserting them from the
+  manifest is exactly the overclaim this audience is best equipped to find,
+  and the leg FAILS if a future edit does it.

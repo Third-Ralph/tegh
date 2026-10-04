@@ -1,0 +1,126 @@
+# CI
+#
+# Runs on every pull request and every push to main. Any failure fails the run.
+#
+#   1. scrub — nothing in the tree names what this repository must not publish
+#   2. tests — the tegh suite, with the posture citations checked strictly
+#   3. lint  — ruff
+#
+# The platform's own suite does not run here. tegh consumes the platform as the
+# `safe-agents` wheel at the version pinned in pyproject.toml, and that suite
+# runs in wjatx/ptc-gal-reference at the release tag.
+#
+# Every third-party package comes from a file under requirements/, at an exact
+# version with the hashes of its published files, and `--require-hashes` makes
+# pip refuse anything else. Every action is pinned to a commit.
+#
+# No AWS credentials and no secrets are used. The citation check reads public
+# data only: files and issue state in wjatx/ptc-gal-reference.
+#
+# How to run locally (mirrors what CI does):
+#   install:  python -m pip install --require-hashes -r requirements/dev.txt
+#             python -m pip install --no-index --no-build-isolation --check-build-dependencies -e ".[dev]"
+#   tests:    pytest                    # add TEGH_CITATIONS_STRICT=1 to fail
+#                                       # rather than skip without gh
+#   scrub:    python scripts/check_scrub.py
+#   lint:     ruff check .
+#
+# The locks are compiled with uv. The command that regenerates each file is the
+# second line of that file. A change to any dependency in pyproject.toml, the
+# platform pin and the [build-system] requirement included, means regenerating
+# them and committing the result with the change.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel in-progress runs for the same ref/PR to avoid queue pile-ups.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  scrub:
+    name: "scrub — no private names, paths or tracker references"
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      # Standard library only, so nothing is installed. The rules and the reason
+      # for each are the table at the top of the script.
+      - name: Scrub check
+        run: python scripts/check_scrub.py
+
+  tests:
+    name: "tests — product surface + posture citations"
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install (dev extra)
+        # requirements/dev.txt is the project's dependencies and its [dev] extra
+        # resolved to exact versions with hashes, plus the build backend. The
+        # project then goes in with `--no-index`, so the second command
+        # downloads nothing and pip has to satisfy the project, its [dev] extra
+        # and its build backend from what the lock installed. That is the check
+        # that pyproject.toml and the lock agree: a lock that pyproject.toml has
+        # moved past, the platform pin included, fails here, naming the
+        # requirement it could not meet.
+        run: |
+          python -m pip install --require-hashes -r requirements/dev.txt
+          python -m pip install --no-index --no-build-isolation --check-build-dependencies -e ".[dev]"
+
+      # The base must come from PyPI. A direct-URL install (a git ref or a local
+      # checkout) records direct_url.json; a PyPI install does not.
+      - name: The platform resolved from PyPI
+        run: |
+          python - <<'PY'
+          import importlib.metadata as md
+          dist = md.distribution("safe-agents")
+          assert dist.read_text("direct_url.json") is None, "safe-agents was installed from a direct URL"
+          print("safe-agents", dist.version, "from the index")
+          PY
+
+      - name: tegh suite (posture citations checked against live issue state)
+        # STRICT makes an unavailable or unauthenticated `gh` a FAILURE rather
+        # than a skip. Locally the check detects and skips so an offline dev is
+        # not blocked; in CI a silent skip would mean the citation check quietly
+        # stopped running, which is the one outcome it must not have.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TEGH_CITATIONS_STRICT: "1"
+        run: pytest -v
+
+  lint:
+    name: "lint — ruff"
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install ruff
+        run: python -m pip install --require-hashes -r requirements/lint.txt
+
+      - name: ruff
+        run: ruff check .

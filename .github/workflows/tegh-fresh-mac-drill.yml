@@ -1,0 +1,126 @@
+# tegh fresh-Mac drill
+#
+# Installs tegh from a clean checkout into a fresh virtual environment on a
+# macOS runner, NOT editable, and runs tegh/tests/drill_fresh_install.py against
+# the installed console script. The drill walks the quickstart's chain: init,
+# wrap with a reviewed admission, a call that executes with a relocated
+# credential, a call that is held and then released, a call that is denied, the
+# tape read back, and the unwrap.
+#
+# What a green run proves: the path from a clean checkout to an installed
+# package to a refused call still works on macOS, with the default tegh home and
+# the default harness home, and with nothing inherited from a developer's shell.
+# The non-editable install is the point. An editable install reads modules from
+# the source tree and hides a file the built package leaves out.
+#
+# What it does not prove: how long any of this takes a person. The review
+# answers are piped, so nobody reads a classification or decides anything. The
+# drill prints its elapsed machine time and labels it as that. The measurement
+# with a person in it is #2, and no figure from this job stands in for it.
+# No coding harness is started either: `tegh call` stands in for the harness's
+# MCP client.
+#
+# The path filter keeps the macOS job to the pushes that can change the
+# installed product. macOS runners are the scarcer and slower-to-start kind, and
+# a run that cannot change the answer is not worth one. The Linux `tests` job in ci.yml runs
+# the same drill on every push through tegh/tests/test_drill_fresh_install.py,
+# against an editable install.
+#
+# No AWS credentials and no secrets are used. The one network fetch is pip
+# downloading the dependencies from PyPI, including the platform (`safe-agents`)
+# at the version pinned in pyproject.toml, each at the exact version and hash in
+# requirements/runtime.txt. The path filter includes requirements/ for that
+# reason: the lock decides what is installed.
+#
+# How to run locally (mirrors what this job does):
+#   python -m venv /tmp/tegh-venv
+#   /tmp/tegh-venv/bin/python -m pip install --require-hashes -r requirements/runtime.txt -r requirements/build-backend.txt
+#   /tmp/tegh-venv/bin/python -m pip install --no-index --no-build-isolation --check-build-dependencies .
+#   /tmp/tegh-venv/bin/python tegh/tests/drill_fresh_install.py --tegh /tmp/tegh-venv/bin/tegh
+
+name: tegh fresh-Mac drill
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "tegh/**"
+      - "pyproject.toml"
+      - "requirements/**"
+      - ".github/workflows/tegh-fresh-mac-drill.yml"
+  workflow_dispatch:
+
+# A newer push supersedes an older run of the same ref; do not pay for both.
+concurrency:
+  group: tegh-fresh-mac-drill-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  drill:
+    name: "tegh: clean checkout to a refused call (macOS)"
+    runs-on: macos-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      # Under RUNNER_TEMP and not in the workspace, so the environment is
+      # outside the checkout it installs from. Not editable: a clean checkout to
+      # an installed package is the claim.
+      #
+      # requirements/runtime.txt is the project's dependencies at exact versions
+      # with hashes, and requirements/build-backend.txt is the build backend the
+      # same way. The project then goes in with `--no-index`, so that command
+      # downloads nothing: pip builds the wheel with the backend the lock
+      # installed and has to satisfy its metadata from what the lock installed.
+      # The locks are universal, so the files this job installs on macOS are
+      # checked against the same lists the Linux jobs use.
+      - name: Install into a fresh venv (not editable)
+        run: |
+          python -m venv "$RUNNER_TEMP/tegh-venv"
+          "$RUNNER_TEMP/tegh-venv/bin/python" -m pip install --require-hashes \
+            -r requirements/runtime.txt -r requirements/build-backend.txt
+          "$RUNNER_TEMP/tegh-venv/bin/python" -m pip install --no-index \
+            --no-build-isolation --check-build-dependencies .
+
+      # The base must come from PyPI. A direct-URL install (a git ref or a local
+      # checkout) records direct_url.json; a PyPI install does not. tegh itself
+      # must be the installed copy and not the checkout.
+      - name: The platform resolved from PyPI, and tegh is not editable
+        run: |
+          cd "$RUNNER_TEMP"
+          tegh-venv/bin/python - <<'PY'
+          import importlib.metadata as md
+          import json
+          import pathlib
+
+          import tegh
+
+          dist = md.distribution("safe-agents")
+          assert dist.read_text("direct_url.json") is None, "safe-agents was installed from a direct URL"
+          print("safe-agents", dist.version, "from the index")
+
+          origin = pathlib.Path(tegh.__file__).resolve()
+          assert "site-packages" in origin.parts, f"imported the checkout, not the installed package: {origin}"
+          direct = json.loads(md.distribution("tegh").read_text("direct_url.json") or "{}")
+          assert not direct.get("dir_info", {}).get("editable"), "tegh is installed editable"
+          print("tegh", md.version("tegh"), "from", origin.parent)
+          PY
+
+      - name: tegh --help
+        run: '"$RUNNER_TEMP/tegh-venv/bin/tegh" --help'
+
+      # The script comes from the checkout, because the tests and the fixture
+      # server are excluded from the built distribution. It imports nothing from
+      # the checkout and drives only the installed `tegh`.
+      - name: Fresh-install drill
+        run: |
+          "$RUNNER_TEMP/tegh-venv/bin/python" tegh/tests/drill_fresh_install.py \
+            --tegh "$RUNNER_TEMP/tegh-venv/bin/tegh"

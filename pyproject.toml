@@ -1,0 +1,63 @@
+[build-system]
+# Exact, and identical to requirements/build-backend.in, so the hashed lock can supply the backend
+# and the build fetches nothing (`--no-build-isolation`, `--check-build-dependencies`).
+requires = ["setuptools==84.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tegh"
+# A development version. The only `tegh` published so far is the name-claim placeholder at 0.0.0,
+# which ships no module; nothing in the code states a release version.
+version = "0.1.0.dev0"
+description = "tegh — pin the MCP tools a coding agent uses behind the safe-agents broker, with no AWS account."
+readme = "README.md"
+# Apache-2.0, copyright Wes Jackson [ruling: maintainer, 2026-09-25]. The platform tegh depends on is
+# licensed separately, in its own repository.
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Wes Jackson" }]
+requires-python = ">=3.12"
+# The platform is the public reference implementation (wjatx/ptc-gal-reference), consumed as its
+# published wheel [ruling: maintainer, 2026-09-30]. Pinned to an exact version so every install resolves
+# the same platform: moving the pin is a deliberate, reviewable commit. A change tegh needs in the
+# base lands upstream first and is consumed here at a version. The `mcp` extra is a runtime need,
+# not a test one: `tegh gateway` execs the broker gateway, whose MCP host client imports the SDK to
+# reach the wrapped project's servers.
+dependencies = [
+    "safe-agents[mcp]==0.73.1",
+    # Direct imports of our own; the platform happens to require these too, but tegh should not
+    # lean on that. pydantic for the lock models, cryptography for lock signing (TL2/TL3).
+    "pydantic>=2.13.4",
+    "cryptography>=42.0",
+    # tegh writes the synthesized broker manifest as YAML and posture reads it back.
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff==0.15.20",
+]
+
+[project.scripts]
+# The tegh product CLI: pin the MCP tools a coding project already uses.
+tegh = "tegh.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["tegh*"]
+# Tests ship with the source tree (and stay collectible under an editable
+# install) but are excluded from the built distribution.
+exclude = ["*.tests", "*.tests.*"]
+
+[tool.setuptools.package-data]
+# The cluster posture job and the script it runs. `tegh/openshift/` is a directory of
+# manifests and not a Python package, so nothing ships from it unless it is named here.
+tegh = ["openshift/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tegh"]
+pythonpath = ["."]
+markers = [
+    "stdio: spawns a real MCP server child process over stdio transport",
+]

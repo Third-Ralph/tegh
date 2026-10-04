@@ -1,0 +1,28 @@
+# secrets — never commit
+.env*
+*.key
+*.pem
+.secrets*
+*_SECRET*
+*_API_KEY*
+# ...but not test MODULES about secrets. core.ignorecase=true (the macOS default) makes
+# *_SECRET* match test_secrets_arms.py, which git then drops from a bulk add SILENTLY.
+# Filename patterns cannot judge content anyway; gitleaks scans contents and is the real guard.
+!tegh/**/test_*.py
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+# written by a local rehearsal of the release workflow's consumer-lock step
+release/
+.venv-*/
+.pytest_cache/
+.ruff_cache/
+# The harness reference notes that posture cites are held out of the published
+# repository for now [ruling: maintainer, 2026-10-04]. They stay in a working
+# checkout; tegh/tests/test_posture_citations.py says what that costs.
+docs/references/harnesses/

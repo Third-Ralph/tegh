@@ -1,0 +1,369 @@
+# Release: build the `tegh` distribution and publish it to PyPI.
+#
+# The filename and the environment name are load-bearing. PyPI's trusted
+# publisher for `tegh` names the owner `Third-Ralph`, the repository `tegh`,
+# this workflow file (`release.yml`) and the environment `pypi`; all four must
+# match the OIDC token or the upload is refused. Renaming either file or
+# environment breaks publishing until the PyPI configuration is changed to
+# match. No API token is stored anywhere.
+#
+# How a release is cut:
+#
+#   1. Set `version` in pyproject.toml on `main` to a release version and wait
+#      for CI to pass there.
+#   2. Tag that commit `v<version>` and push the tag.
+#   3. Run this workflow against the tag:
+#        gh workflow run release.yml --ref v<version>
+#
+# Run against a branch instead, it builds and checks the distribution and
+# publishes nothing. That is the rehearsal, and it is the only one: there is no
+# TestPyPI leg, because a rehearsal that uploads somewhere else exercises a
+# different publisher configuration from the one that matters.
+#
+# What it deliberately does not do. There is no tag or push trigger. A PyPI
+# version number can never be reused, even after the release is deleted, so
+# publishing is a separate deliberate act and never a side effect of tagging.
+#
+# What a tag run refuses:
+#
+#   tag != version   the tag says one thing and the metadata another, and the
+#                    artifact carries the metadata.
+#   a dev version    pyproject.toml carries a development version between
+#                    releases. Choosing the release version is the owner's
+#                    decision, made in a commit, and a tag does not make it.
+#   not on main      the tag points at a commit that never landed.
+#   CI not green     the release would be the first run of the suite on that
+#                    commit. A run still in progress counts as not green; wait
+#                    for it and run this again.
+#
+# What every run refuses, branch or tag: a dependency stated as a direct URL
+# (`name @ git+https://...`). PyPI rejects an upload whose metadata carries
+# one, and the platform must be consumed as its published wheel.
+#
+# The build job holds no credential and the publish job runs no project code:
+# it downloads the files the build job checked and hands them to the upload
+# action. That split is why they are separate jobs. A third job attaches the
+# same files to a GitHub release, with the consumer lock beside them; it holds
+# write access to this repository's releases and also runs no project code.
+#
+# The consumer lock. Wheel metadata carries version ranges, and a range cannot
+# carry a hash. So the release also publishes one requirements file that pins
+# `tegh` itself, at the hash of the wheel built here, and every package it
+# depends on, the platform (`safe-agents`) included, at the hashes in
+# requirements/runtime.txt. A consumer installs it with `--require-hashes`.
+#
+# If the last job fails after the upload to PyPI succeeded, re-run that job
+# alone. The PyPI version is already spent and must not be rebuilt.
+
+name: Release
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+
+  build:
+    name: "build: sdist and wheel, checked and installed"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Reads this commit's CI result. Nothing here writes.
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history: the ancestry check below compares against origin/main.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: The tag names the version in pyproject.toml
+        if: github.ref_type == 'tag'
+        run: |
+          version=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match pyproject.toml version $version (expected v$version)."
+            exit 1
+          fi
+
+      # Matches `dev` anywhere, so the unnormalized spellings (`0.1.0dev0`,
+      # `0.1.0-dev`) are refused along with `0.1.0.dev0`.
+      - name: The version is not a development version
+        if: github.ref_type == 'tag'
+        run: |
+          version=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          case "$version" in
+            *dev*)
+              echo "::error::pyproject.toml version $version is a development version. Set the release version on main first."
+              exit 1
+              ;;
+          esac
+
+      - name: The tagged commit is on main
+        if: github.ref_type == 'tag'
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_SHA is not an ancestor of origin/main. Release only what has landed."
+            exit 1
+          fi
+
+      # Pull-request runs are excluded: their head_sha is the branch head, and
+      # what they tested is the merge commit, which is a different tree.
+      - name: CI passed on this commit
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          green=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&status=success" \
+            --jq '[.workflow_runs[] | select(.event != "pull_request")] | length')
+          if [ "$green" -lt 1 ]; then
+            echo "::error::No successful CI run for $GITHUB_SHA. Wait for CI on main to pass, then run this again."
+            exit 1
+          fi
+
+      - name: Build sdist and wheel
+        # requirements/release.txt is `build`, `twine` and the build backend at
+        # exact versions with hashes. `--no-isolation` makes `build` use that
+        # installed backend rather than fetching one into a temporary
+        # environment, so the build downloads nothing, and it stops before
+        # building if the installed backend is not the one pyproject.toml
+        # requires. `build` still makes the sdist and then builds the wheel from
+        # that sdist, so a wheel existing at all is the proof the sdist is
+        # buildable.
+        run: |
+          python -m pip install --require-hashes -r requirements/release.txt
+          python -m build --no-isolation --outdir dist
+
+      - name: Metadata renders on PyPI
+        run: python -m twine check --strict dist/*
+
+      # PyPI refuses an upload whose metadata names a dependency by URL, and it
+      # refuses at the upload, after the version is chosen and tagged. This
+      # reads the metadata both files actually carry, the wheel's METADATA and
+      # the sdist's PKG-INFO, so the refusal comes here instead.
+      - name: No dependency is a direct URL
+        run: |
+          python - <<'PY'
+          import email.parser
+          import pathlib
+          import sys
+          import tarfile
+          import zipfile
+
+
+          def metadata_texts():
+              """Yield (label, text) for the wheel's METADATA and the sdist's PKG-INFO."""
+              wheels = list(pathlib.Path("dist").glob("*.whl"))
+              sdists = list(pathlib.Path("dist").glob("*.tar.gz"))
+              if len(wheels) != 1 or len(sdists) != 1:
+                  sys.exit(f"expected one wheel and one sdist, found {wheels} and {sdists}")
+              with zipfile.ZipFile(wheels[0]) as wheel:
+                  members = [n for n in wheel.namelist() if n.endswith(".dist-info/METADATA")]
+                  if len(members) != 1:
+                      sys.exit(f"{wheels[0].name}: expected one METADATA, found {members}")
+                  yield f"{wheels[0].name}:{members[0]}", wheel.read(members[0]).decode("utf-8")
+              with tarfile.open(sdists[0]) as sdist:
+                  # The top-level PKG-INFO, not the copy inside *.egg-info.
+                  members = [n for n in sdist.getnames() if n.count("/") == 1 and n.endswith("/PKG-INFO")]
+                  if len(members) != 1:
+                      sys.exit(f"{sdists[0].name}: expected one top-level PKG-INFO, found {members}")
+                  yield f"{sdists[0].name}:{members[0]}", sdist.extractfile(members[0]).read().decode("utf-8")
+
+
+          failures = []
+          for label, text in metadata_texts():
+              requires = email.parser.Parser().parsestr(text).get_all("Requires-Dist") or []
+              if not requires:
+                  failures.append(f"{label}: no Requires-Dist lines at all, so nothing was checked")
+              direct = [r for r in requires if " @ " in r or "://" in r]
+              failures.extend(f"{label}: direct-URL dependency: {r}" for r in direct)
+              print(f"{label}: {len(requires)} Requires-Dist, {len(direct)} direct-URL")
+          if failures:
+              sys.exit("\n".join(failures))
+          PY
+
+      # pyproject.toml excludes the test packages and names one top-level
+      # package. This reads the wheel rather than trusting that configuration,
+      # so a later edit to it cannot quietly change what ships.
+      - name: The wheel carries the package it should and no test suites
+        run: |
+          python - <<'PY'
+          import pathlib, sys, zipfile
+
+          EXPECTED_TOP_LEVEL = {"tegh"}
+          REQUIRED = {
+              "tegh/__init__.py",
+              "tegh/cli.py",
+              "tegh/openshift/59-job-posture.yaml",
+              "tegh/openshift/cluster-posture.sh",
+          }
+
+          wheels = list(pathlib.Path("dist").glob("*.whl"))
+          if len(wheels) != 1:
+              sys.exit(f"expected one wheel, found {wheels}")
+          names = zipfile.ZipFile(wheels[0]).namelist()
+          top_level = {n.split("/")[0] for n in names if ".dist-info/" not in n}
+          if top_level != EXPECTED_TOP_LEVEL:
+              sys.exit(f"wheel top-level is {sorted(top_level)}, expected {sorted(EXPECTED_TOP_LEVEL)}")
+          suites = [n for n in names if "/tests/" in n]
+          if suites:
+              sys.exit(f"wheel carries test suites: {suites[:10]}")
+          missing = REQUIRED - set(names)
+          if missing:
+              sys.exit(f"wheel is missing {sorted(missing)}")
+          print(f"{wheels[0].name}: {len(names)} entries, top-level {sorted(top_level)}")
+          PY
+
+      # Run from outside the checkout. From inside it, `import tegh` resolves to
+      # the source tree and this step passes whatever the wheel contains.
+      #
+      # The wheel's dependencies come from requirements/runtime.txt, exact
+      # versions with hashes. The wheel then goes in with `--no-index`, so pip
+      # has to satisfy its metadata from what that lock installed, and fails
+      # naming any requirement the lock does not meet.
+      - name: The wheel installs into a fresh environment and runs
+        run: |
+          python -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/python" -m pip install --require-hashes -r requirements/runtime.txt
+          "$RUNNER_TEMP/venv/bin/python" -m pip install --no-index "$(ls "$PWD"/dist/*.whl)"
+          cd "$RUNNER_TEMP"
+          venv/bin/python - <<'PY'
+          import importlib.metadata as md
+          import pathlib
+
+          import tegh
+          import tegh.cli  # noqa: F401
+
+          origin = pathlib.Path(tegh.__file__).resolve()
+          assert "site-packages" in origin.parts, f"imported the checkout, not the wheel: {origin}"
+          platform = md.distribution("safe-agents")
+          assert platform.read_text("direct_url.json") is None, "safe-agents was installed from a direct URL"
+          print(f"imported from {origin.parent}, on safe-agents {platform.version}")
+          PY
+          venv/bin/tegh --help > /dev/null
+
+      # requirements/runtime.txt already pins every dependency. This adds the
+      # one line it cannot hold, the distribution itself at the hash of the
+      # wheel built above, and records the checksum of every file the release
+      # publishes.
+      - name: Write the consumer lock and the checksums
+        run: |
+          version=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          wheel_sha=$(sha256sum dist/*.whl | cut -d' ' -f1)
+          lock="tegh-$version-requirements.txt"
+          mkdir release
+          {
+            echo "# tegh $version and everything it depends on, the safe-agents platform included,"
+            echo "# each at an exact version and the sha256 of its published files."
+            echo "#"
+            echo "#   python -m pip install --require-hashes -r $lock"
+            echo "#"
+            echo "tegh==$version \\"
+            echo "    --hash=sha256:$wheel_sha"
+            cat requirements/runtime.txt
+          } > "release/$lock"
+          (cd dist && sha256sum -- *) > release/SHA256SUMS
+          (cd release && sha256sum -- "$lock") >> release/SHA256SUMS
+          cat release/SHA256SUMS
+
+      # The command a consumer runs, against the file a consumer downloads. The
+      # wheel is not on PyPI yet, so pip finds it in dist/; it still has to
+      # match the hash in the lock, and every dependency still comes from the
+      # index by hash. A dependency the lock does not pin fails here, because
+      # `--require-hashes` refuses any requirement without one.
+      - name: The consumer lock installs the wheel by hash
+        run: |
+          python -m venv "$RUNNER_TEMP/consumer"
+          "$RUNNER_TEMP/consumer/bin/python" -m pip install --require-hashes \
+            --find-links "$PWD/dist" -r release/tegh-*-requirements.txt
+          cd "$RUNNER_TEMP"
+          consumer/bin/tegh --help
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release
+          path: release/
+          if-no-files-found: error
+
+  publish:
+    name: "publish: PyPI, by trusted publisher"
+    needs: build
+    # A branch run stops after the build. A fork cannot mint this repository's
+    # OIDC identity, and failing here is clearer than failing at the upload.
+    if: github.ref_type == 'tag' && github.event.repository.fork == false
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/tegh/
+    permissions:
+      # The OIDC token PyPI exchanges for an upload credential. This job checks
+      # nothing out, so it needs no read access to the repository.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
+
+      # Pinned to a commit rather than the moving `release/v1` ref, because this
+      # is the one step that runs holding the publish identity.
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+
+  github-release:
+    name: "release: attach the files and the consumer lock"
+    needs: [build, publish]
+    if: github.ref_type == 'tag' && github.event.repository.fork == false
+    runs-on: ubuntu-latest
+    permissions:
+      # Creates the release for the tag and uploads its files. This job checks
+      # nothing out and runs nothing from the repository.
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release
+          path: release/
+
+      # `--verify-tag` refuses to create the tag: the release attaches to the
+      # tag this run was dispatched against or not at all.
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          {
+            echo "Published to PyPI as \`tegh==$version\`."
+            echo
+            echo "To install with every dependency checked against a pinned hash, download"
+            echo "\`tegh-$version-requirements.txt\` from this release and run:"
+            echo
+            echo '```'
+            echo "python -m pip install --require-hashes -r tegh-$version-requirements.txt"
+            echo '```'
+            echo
+            echo "\`SHA256SUMS\` lists the sha256 of the wheel, the sdist and that file."
+          } > notes.md
+          gh release create "$GITHUB_REF_NAME" --verify-tag \
+            --title "tegh $version" --notes-file notes.md \
+            dist/* release/*
