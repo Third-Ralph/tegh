@@ -33,7 +33,7 @@ concrete Claude Code form here:
    fields, never footnotes.
 
 The authority for WHERE to look is `docs/references/harnesses/claude-code.md`
-§1, corrected in three places by a live read of this machine's `~/.claude.json`
+§1, corrected in three places by a live read of one developer machine's `~/.claude.json`
 on 2026-07-25: there is no top-level `mcpServers` key when the user has no
 user-scope servers (absence means empty, never an error); the per-project
 approval/enablement keys live in `~/.claude.json` under the project entry, not
@@ -81,7 +81,7 @@ from tegh.posture import PostureLine
 #:
 #: Deliberately weaker than the summary of this that was in use before
 #: 2026-07-26, which said "structural, unbypassed except bypassPermissions". Checking that
-#: against the research doc found three problems, and the third is why this
+#: against the reference found three problems, and the third is why this
 #: line says `unknown` rather than `partial`:
 #:
 #: 1. There are FIVE documented protected-path outcomes, not two — `dontAsk`
@@ -97,22 +97,23 @@ from tegh.posture import PostureLine
 #:    lever — and the wrapped agent has a Bash tool. Whether the agent can walk
 #:    the same path is not addressed anywhere.
 #:
-#: Point 3 may make this the Hermes `write_file`-vs-`terminal` hole wearing
-#: better documentation. Resolving it needs a behavioural test, not another
+#: Point 3 may make this the hole other harnesses have between a gated
+#: file-write tool and an ungated terminal tool, with better documentation. Resolving it needs a behavioural test, not another
 #: doc read; see docs/posture-ladder.md on the coverage artifact.
 DURABILITY = PostureLine(
     claim="Whether a wrapped Claude Code agent can undo its own wrap is UNRESOLVED",
     holds="unknown",
-    source="docs/references/harnesses/claude-code.md:319-347, 389-395 "
-    "(vendor permission-modes and mcp pages)",
+    source="docs/references/harnesses/claude-code.md:368-405, 462-476 "
+    "(the vendor's permission-modes page for the first range; the second records a "
+    "statement with no vendor source)",
     detail=".mcp.json and .claude.json are hard-coded protected paths evaluated BEFORE "
     "permission rules, so permissions.allow cannot pre-approve an in-session write — but "
     "the outcome is a PROMPT, with a session-scoped 'allow Claude to edit its own "
     "settings for this session' opt-in inside the default mode, and no prompt at all "
     "under bypassPermissions. Crucially the docs never say which TOOLS the gate covers, "
-    "while documenting `claude mcp remove` from a shell as ungated — the agent has a "
-    "shell. All of this is a documentation claim: the research ran no commands against a "
-    "running binary [claude-code.md:437-438]",
+    "while the reference records, with no vendor source, that `claude mcp remove` from a "
+    "shell is ungated — the agent has a shell. All of this is a documentation claim: no command was run against a running "
+    "binary when the documentation was read [claude-code.md:543-547]",
 )
 
 #: Which member of the format's one closed catalog this adapter speaks for
@@ -367,8 +368,8 @@ def config_sites(
     that only cleared the local one, and the gateway would be one server among
     several while `tegh posture` claimed exclusivity. The cost is real and the
     caller must surface it: wrapping one project displaces user-scope servers
-    for all of them until unwrap. That is why unwrap restores the block rather
-    than tegh's idea of it.
+    for all of them until unwrap. That is why unwrap puts back the servers the
+    wrap displaced, as recorded, and not tegh's idea of them.
 
     The gateway lands at **local** scope: it stays out of the committable
     `.mcp.json`, so it is never accidentally shared, and it does not trigger the

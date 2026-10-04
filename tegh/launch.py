@@ -31,9 +31,10 @@ from typing import Mapping, Optional, Sequence
 #: (the non-Windows list, read at mcp 1.30.0), which is what its stdio client
 #: hands a server when the config entry names no `env` block. It is the published
 #: default for an MCP stdio client and stands in for "what a harness passes":
-#: `docs/references/harnesses/claude-code.md` does not state what Claude Code
-#: itself gives a stdio child, so this is the floor and not a claim about that
-#: harness. Copied by value and
+#: `docs/references/harnesses/claude-code.md` records only that Claude Code
+#: injects `CLAUDE_PROJECT_DIR`, and does not establish which other variables it
+#: gives a stdio child, so this is the floor and not a claim about that harness.
+#: Copied by value and
 #: not imported: the `mcp` SDK is not something tegh's product code stands on, and
 #: six names are cheaper to own than a dependency edge is to explain.
 #:

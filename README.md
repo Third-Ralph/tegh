@@ -46,6 +46,9 @@ run (`safe_agents.broker.schemas` and the gateway client from `safe_agents.broke
 the platform's commands as child processes. `tegh/tests/test_lock.py` enforces that boundary. A
 change tegh needs in the platform lands there first and is consumed here at a version.
 
+`docs/references/harnesses/claude-code.md` records, with sources, how Claude Code stores and loads
+MCP configuration. The wrap mechanics are built against it.
+
 ## Develop
 
 From a checkout, in a virtual environment. `requirements/dev.txt` holds the project's dependencies

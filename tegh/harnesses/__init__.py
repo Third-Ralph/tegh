@@ -50,7 +50,7 @@ def durability_line(harness: "Harness") -> "PostureLine":
     return PostureLine(
         claim=f"Wrap durability for {harness!r} is unknown",
         holds="unknown",
-        source="docs/references/harnesses/ carries no researched row for this harness",
+        source="docs/references/harnesses/ carries no reference for this harness",
         detail="no durability claim is made rather than inheriting another harness's",
     )
 

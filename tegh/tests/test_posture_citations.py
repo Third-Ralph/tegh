@@ -104,21 +104,6 @@ _RI_PIN = "v" + re.search(
 _RI_CACHE: dict[str, Path] = {}
 
 
-#: The harness reference notes, which posture cites as its primary sources for
-#: how each coding agent is configured. They are kept out of the published
-#: repository for now [ruling: maintainer, 2026-10-04], so a checkout may not
-#: have them. Where the directory is present its citations are checked like any
-#: other; where it is absent they cannot be, and are passed over. That is a
-#: weaker check than the rest of this file, and it lasts until the notes are
-#: published: a cited range in them can then rot unseen in CI.
-_HELD_BACK = "docs/references/harnesses/"
-
-
-def _held_back(cited: str) -> bool:
-    """A citation into the held-back notes, in a checkout that lacks them."""
-    return cited.startswith(_HELD_BACK) and not (REPO_ROOT / _HELD_BACK).is_dir()
-
-
 def _unchecked(message: str) -> None:
     """Skip locally, fail under TEGH_CITATIONS_STRICT: 'could not run' is not 'clean'."""
     if os.environ.get("TEGH_CITATIONS_STRICT") == "1":
@@ -258,8 +243,6 @@ def test_every_cited_repo_path_exists():
     """
     checked = []
     for line, citation in _citations(_static_lines(), RepoPath):
-        if _held_back(citation.path):
-            continue
         resolved = _resolve(citation.path)
         assert resolved.exists(), (
             f"posture line {line.claim!r} cites {citation.path!r}, which does "
@@ -281,7 +264,7 @@ def test_every_cited_line_range_ends_inside_its_file():
     """
     checked = []
     for line, citation in _citations(_static_lines(), RepoPath):
-        if citation.last_line is None or _held_back(citation.path):
+        if citation.last_line is None:
             continue
         resolved = _resolve(citation.path)
         length = len(resolved.read_text().splitlines())
