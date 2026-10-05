@@ -173,6 +173,32 @@ def gateway_argv(
     ]
 
 
+def gateway_home_in(argv: Sequence[str], *, project: Path | str) -> Optional[str]:
+    """The tegh home `argv` runs `project`'s gateway from, or None if it does not.
+
+    The reading of what `gateway_argv` writes, kept beside it so the two cannot
+    drift: `tegh wrap` uses it to recognise an entry it wrote itself. The match
+    is on everything after the launcher, which is the part that says what the
+    command does. The launcher is not compared, because it is the part that
+    changes between two installs of tegh (a console script in one virtualenv,
+    `python -P -m tegh.cli` in another) and between two versions of it (0.1.1
+    wrote that form without the `-P`), and an entry written by any of them is
+    still this project's gateway. Neither is the entry's name: a server of the user's
+    own called `tegh` is not the gateway, and a renamed gateway still is.
+
+    The home is returned and not compared. A project wrapped from another tegh
+    home is wrapped all the same, and the caller needs the home to say where.
+    """
+    if len(argv) < 6:  # five words of `gateway_argv`, after at least one of launcher
+        return None
+    subcommand, project_flag, named_project, home_flag, home = argv[-5:]
+    if (subcommand, project_flag, home_flag) != ("gateway", "--project", "--home"):
+        return None
+    if named_project != str(Path(project).expanduser().resolve()):
+        return None
+    return home
+
+
 def inherited_env(
     names: Sequence[str], environ: Optional[Mapping[str, str]] = None
 ) -> dict[str, str]:

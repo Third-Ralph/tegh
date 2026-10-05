@@ -72,7 +72,11 @@ def _sites(claude_json: Path, project_mcp: Path) -> tuple[list[ConfigSite], Conf
     )
 
 
-_GATEWAY = {"command": "/usr/local/bin/tegh", "args": ["gateway", "--project", _PROJECT]}
+#: A real gateway entry, as a wrap writes it: an unwrap finds the wrap's entry
+#: by the command it runs, so a stand-in would be kept as the user's server.
+_GATEWAY = claude_code.gateway_entry(
+    _PROJECT, launcher=["/usr/local/bin/tegh"], home="/home/someone/.tegh"
+)
 
 
 def _cleared(coordinate: str, value: str) -> dict[str, str]:

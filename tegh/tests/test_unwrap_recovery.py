@@ -256,6 +256,133 @@ def test_a_backup_that_recorded_no_gateway_still_loses_only_the_gateway(
 
 
 # ---------------------------------------------------------------------------
+# The gateway entry is the one that runs the gateway, whatever it is called
+# ---------------------------------------------------------------------------
+
+
+def _local_block(document: dict, state: dict) -> dict:
+    return document["projects"][str(state["project"])]["mcpServers"]
+
+
+def _renamed(document: dict, state: dict) -> None:
+    block = _local_block(document, state)
+    block["broker"] = block.pop("tegh")
+
+
+def _renamed_with_a_server_beside_it(document: dict, state: dict) -> None:
+    _renamed(document, state)
+    _local_block(document, state)["bar"] = _BAR
+
+
+def _moved_to_user_scope(document: dict, state: dict) -> None:
+    document["mcpServers"] = {"tegh": _local_block(document, state).pop("tegh")}
+
+
+def _name_taken_by_a_server(document: dict, state: dict) -> None:
+    """The gateway entry replaced by a server of the user's own, under its name."""
+    _local_block(document, state)["tegh"] = _BAR
+
+
+def _edit_config(state: dict, change) -> None:
+    document = json.loads(state["claude_json"].read_text(encoding="utf-8"))
+    change(document, state)
+    state["claude_json"].write_text(
+        json.dumps(document, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+_RUNS_THE_GATEWAY = "which runs tegh's gateway for this project"
+
+
+@pytest.mark.parametrize(
+    ("blocks", "since", "planned", "left"),
+    [
+        pytest.param(
+            {"local": _NOTES}, _renamed,
+            ["restore {local} (notes)", "remove {local} (broker), " + _RUNS_THE_GATEWAY],
+            {"local": _NOTES, "user": None},
+            id="renamed",
+        ),
+        pytest.param(
+            {"project_scope": _NOTES}, _renamed,
+            ["remove {local} (broker), " + _RUNS_THE_GATEWAY, "restore {project} (notes)"],
+            {"local": None, "user": None},
+            id="renamed-where-no-block-was",
+        ),
+        pytest.param(
+            # The entry the wrap added is named by what it is called now.
+            {"project_scope": _NOTES}, _renamed_with_a_server_beside_it,
+            ["remove {local} (broker), " + _RUNS_THE_GATEWAY,
+             "keep {local} (bar), added since the wrap", "restore {project} (notes)"],
+            {"local": {"bar": _BAR}, "user": None},
+            id="renamed-beside-a-server-added-since",
+        ),
+        pytest.param(
+            {"local": _NOTES}, _moved_to_user_scope,
+            ["restore {local} (notes)", "remove {user} (tegh), " + _RUNS_THE_GATEWAY],
+            {"local": _NOTES, "user": None},
+            id="moved-to-another-scope",
+        ),
+        pytest.param(
+            # Called what the wrap called its entry, and running something
+            # else: the user's, and not tegh's to remove.
+            {"local": _NOTES}, _name_taken_by_a_server,
+            ["restore {local} (notes)", "keep {local} (tegh), added since the wrap"],
+            {"local": {**_NOTES, "tegh": _BAR}, "user": None},
+            id="a-server-only-called-tegh",
+        ),
+    ],
+)
+def test_the_gateway_entry_is_found_by_what_it_runs(
+    tmp_path, monkeypatch, capsys, blocks: dict, since, planned: list, left: dict
+) -> None:
+    state = interposed(tmp_path, monkeypatch, **blocks)
+    _edit_config(state, since)
+    labels = {scope: _label(state, scope) for scope in ("local", "project", "user")}
+    backup = f"remove tegh's wrap backup at {state['store'].backup_path(state['project'])}"
+
+    assert unwrap_cli(state, "--yes") == unwrap.EXIT_OK, capsys.readouterr().err
+    plan_text, report_text = capsys.readouterr().out.split("It leaves untouched:")
+
+    assert _action_lines(plan_text) == [line.format(**labels) for line in planned] + [backup]
+    done = [line.replace("remove ", "removed ", 1) for line in _action_lines(plan_text)]
+    assert [line for line in _action_lines(report_text) if line.startswith("removed ")] == [
+        line for line in done if line.startswith("removed ")
+    ]
+    for scope, block in left.items():
+        assert _block_at(state, scope) == block, scope
+    assert not state["store"].backup_path(state["project"]).exists()
+
+
+def test_a_gateway_entry_that_appears_while_the_question_waits_stops_the_unwrap(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """Its removal is not in the plan the person agreed to."""
+    state = interposed(tmp_path, monkeypatch, local=_NOTES)
+    during: dict = {}
+
+    def _a_copy_is_made_then_the_person_agrees(question: str) -> str:
+        _add_server(state, "local", "broker", _block_at(state, "local")["tegh"])
+        during.update(fingerprint(tmp_path))
+        return "y"
+
+    rc = unwrap_cli(state, prompt=_a_copy_is_made_then_the_person_agrees)
+    captured = capsys.readouterr()
+
+    assert rc == unwrap.EXIT_NOT_UNWRAPPED
+    assert fingerprint(tmp_path) == during, "the unwrap wrote after the config changed"
+    assert (
+        f"{_label(state, 'local')} changed while tegh unwrap was waiting: it now "
+        "holds broker, running tegh's gateway for this project, which the plan did "
+        "not show being removed"
+    ) in captured.err
+
+    assert unwrap_cli(state, "--yes") == unwrap.EXIT_OK
+    assert f"(broker), {_RUNS_THE_GATEWAY}" in capsys.readouterr().out
+    assert _block_at(state, "local") == _NOTES
+
+
+# ---------------------------------------------------------------------------
 # A restore that stops part-way
 # ---------------------------------------------------------------------------
 

@@ -71,6 +71,7 @@ from tegh.harnesses import claude_code
 from tegh.launch import (
     BROKER_INHERITED_ENV_VARS,
     DEFAULT_CALL_TIMEOUT_SECONDS,
+    gateway_home_in,
     inherited_env,
     python_module_argv,
     tegh_launcher,
@@ -849,9 +850,9 @@ def _warn_about_held_tools(confirmed: list[tuple[McpToolDef, ToolOp]]) -> None:
         "release it with\n"
         "     `tegh approve <intent-id>` — once per call, not once for the tool. "
         "If any is\n"
-        "     really a read, re-run `tegh wrap` and correct it with [e] — a "
-        "missing\n"
-        "     readOnlyHint is what proposed the write."
+        "     really a read, run `tegh unwrap`, then `tegh wrap` again, and "
+        "correct it with\n"
+        "     [e] — a missing readOnlyHint is what proposed the write."
     )
 
 
@@ -910,6 +911,58 @@ def _admit(
     return True, ""
 
 
+def _already_wrapped(result: DiscoveryResult, project: Path) -> Optional[str]:
+    """The refusal for a project whose config already runs tegh's gateway.
+
+    None when it does not. A wrapped project's only MCP server IS the gateway,
+    so a second wrap would snapshot it, be shown no tools, and replace the
+    manifest and the signed lock of the first wrap with ones that admit none.
+
+    Recognised by what the entry RUNS (`launch.gateway_home_in`, the reading of
+    the command `gateway_entry` writes) and at any scope, shadowed or not. The
+    name is not the test: `tegh` is only what a wrap happens to call it.
+
+    The way out it names is `tegh unwrap`, with the tegh home the entry itself
+    names, when that home holds the backup an unwrap restores from. When it
+    does not, an unwrap would refuse for want of one, so the entry is named as
+    something to remove by hand, and the servers as something to put back by
+    hand: nothing else knows what they were.
+    """
+    for server in (*result.effective, *result.shadowed):
+        if server.command is None:
+            continue
+        home = gateway_home_in([server.command, *server.args], project=project)
+        if home is None:
+            continue
+        if TeghStore(home=Path(home)).backup_path(project).exists():
+            way_out = (
+                "restore the original servers with `tegh unwrap --project "
+                f"{project} --home {home}`"
+            )
+        else:
+            # Taking the entry out is not enough to wrap again: the servers
+            # the first wrap displaced are in no file tegh can find, and a
+            # wrap of a project with no servers has nothing to pin.
+            way_out = (
+                "remove that entry from the config by hand and put your own "
+                f"servers back in its place (the tegh home it names, {home}, "
+                "holds no wrap backup for this project, so `tegh unwrap` has "
+                "nothing to restore them from)"
+            )
+        # `source_path` is a pointer into the file; a person wants the file.
+        config_file = server.source_path.partition("#/")[0]
+        return (
+            f"{project} is already wrapped: its harness config "
+            f"({server.scope.value} scope, {config_file}) runs tegh's gateway "
+            f"for this project as the server {server.server_id!r}. Wrapping it again "
+            "would review the gateway itself as one of your servers and replace "
+            "tegh.lock, dropping the tools the first wrap pinned. Nothing was "
+            f"changed. To change what is admitted, {way_out}, then run `tegh "
+            "wrap` again."
+        )
+    return None
+
+
 def wrap_command(args: argparse.Namespace, *, prompt: Prompt = input) -> int:
     harness = HARNESS_ALIASES[args.harness]
     adapter = ADAPTERS[harness]
@@ -931,6 +984,13 @@ def wrap_command(args: argparse.Namespace, *, prompt: Prompt = input) -> int:
     findings_text = _render_findings(result)
     if findings_text:
         print(findings_text)
+
+    # Before the findings are weighed and long before the review: no flag makes
+    # a second wrap of a wrapped project mean anything but pinning the gateway.
+    refusal = _already_wrapped(result, project)
+    if refusal is not None:
+        print(f"\nREFUSED: {refusal}", file=sys.stderr)
+        return 2
 
     blocking = result.blocking_findings
     if blocking and not args.accept_gaps:

@@ -49,13 +49,14 @@ def minimal_child_env() -> dict[str, str]:
     return {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(REPO)}
 
 
-def wrap_admit_all(harness: dict) -> int:
+def wrap_admit_all(harness: dict, *flags: str) -> int:
     return main(
         [
             "wrap", "claude",
             "--project", str(harness["project"]),
             "--harness-home", str(harness["home"]),
             "--admit-all",
+            *flags,
         ]
     )
 
@@ -281,7 +282,11 @@ def interposed(
         interpose.plan_interposition(
             sites=sites,
             gateway_site=gateway_site,
-            gateway_entry={"command": "tegh", "args": ["gateway"]},
+            # As a wrap writes it. An unwrap finds the wrap's entry by the
+            # command it runs, so a stand-in would be kept as the user's server.
+            gateway_entry=claude_code.gateway_entry(
+                project, launcher=["tegh"], home=tegh_home
+            ),
             cleared_config=cleared,
         ),
         wrapped_at="2026-10-04T00:00:00+00:00",
