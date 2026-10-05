@@ -3,7 +3,7 @@
 Ten subcommands, and a deliberate division of labour with the base:
 
   init     mint this machine's tegh home (HMAC key, local issuer signing key)
-  wrap     discover -> snapshot -> review -> admit -> tegh.lock -> interpose
+  wrap     discover -> snapshot -> review -> propose -> tegh.lock -> interpose -> admit
   gateway  run the broker's MCP mouth for one wrapped project (what the harness spawns)
   call     drive one tool call through the gateway as the wrapped principal (`call.py`)
   approve  release a call the broker is holding (the local arm of the platform's owner-approval seam)
@@ -38,11 +38,13 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import re
 import subprocess
+import shlex
 import sys
 from dataclasses import dataclass, field as dc_field
 from pathlib import Path
-from typing import Callable, Mapping, Optional, Sequence
+from typing import Callable, Collection, Mapping, Optional, Sequence
 
 import yaml
 
@@ -63,7 +65,6 @@ from tegh.configvalues import LiteralField
 from tegh.discovery import (
     DiscoveredServer,
     DiscoveryResult,
-    UnrepresentableTransportError,
 )
 from tegh import interpose
 from tegh import unwrap
@@ -88,7 +89,6 @@ from tegh.lock import (
 from tegh.lockfile import (
     LoadedLock,
     LockSignatureInvalid,
-    UnsignedLockRefused,
     lock_paths,
     read_lock,
     write_lock,
@@ -113,6 +113,7 @@ from tegh.store import (
     provision,
     tegh_home,
 )
+from tegh.transaction import Stopped, WrapTransaction, signals_held, stops_like_ctrl_c
 
 #: Adapters by harness name. A closed registry: `wrap <harness>` selects from
 #: it and can never name a module to import (docs/config-provenance.md).
@@ -135,14 +136,63 @@ _PROPOSAL_TTL_HOURS = "1"
 Prompt = Callable[[str], str]
 
 
+class _InputEnded(Exception):
+    """Input ended at one of a wrap's questions. Carries the question asked."""
+
+
+def _ask(question: str) -> str:
+    """`input`, with a CLOSED descriptor read as the end of input that it is.
+
+    `tegh wrap <&-` starts Python with `sys.stdin` as None, and `input` then
+    raises a RuntimeError where an empty pipe raises EOFError. Both are nobody
+    answering.
+    """
+    if sys.stdin is None:
+        raise EOFError
+    return input(question)
+
+
+def _answered_or_refused(prompt: Prompt) -> Prompt:
+    """Make the end of input a refusal of the wrap, at every question it asks.
+
+    No question a wrap asks has an answer that silence may stand for: each one
+    either moves a credential or admits a tool. A prompt that resolved the end
+    of input to its default would let a wrap whose answers ran out finish on
+    decisions nobody made, and one that let the EOFError through is a
+    traceback with a credential already moved. `wrap_command` turns this into
+    the refusal, in one place, with what the wrap had written put back.
+    """
+
+    def ask(question: str) -> str:
+        try:
+            return prompt(question)
+        except EOFError:
+            raise _InputEnded(question.strip()) from None
+
+    return ask
+
+
 def _now() -> str:
     return datetime.datetime.now(datetime.UTC).isoformat()
 
 
-def _run_ceremony(args: list[str], env: dict[str, str]) -> subprocess.CompletedProcess:
+#: How a ceremony subprocess is started: an argv and an environment in, the
+#: finished process out. A wrap passes its transaction's `run`, which keeps the
+#: handle so that a stopped wrap stops the ceremony, and the server the
+#: ceremony spawned, before it reports. `diff` writes nothing and passes `_run`.
+Runner = Callable[[Sequence[str], Mapping[str, str]], subprocess.CompletedProcess]
+
+
+def _run(argv: Sequence[str], env: Mapping[str, str]) -> subprocess.CompletedProcess:
     return subprocess.run(  # noqa: S603 — fixed argv, no shell
-        [*_CEREMONY, *args], env=env, capture_output=True, text=True
+        list(argv), env=dict(env), capture_output=True, text=True
     )
+
+
+def _run_ceremony(
+    run: Runner, args: list[str], env: dict[str, str]
+) -> subprocess.CompletedProcess:
+    return run([*_CEREMONY, *args], env)
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +291,7 @@ def _synthesize_manifest(
     tools_by_server: Optional[dict[str, list[tuple[McpToolDef, ToolOp]]]] = None,
     env_by_server: Optional[dict[str, dict[str, str]]] = None,
     credentials_by_server: Optional[dict[str, dict[str, str]]] = None,
+    named: Optional[Collection[tuple[str, str]]] = None,
 ) -> dict:
     """Build key #1: the namespace + ToolOp declaration for this project.
 
@@ -264,6 +315,12 @@ def _synthesize_manifest(
     goes to `connector_auth.env_map` instead, built from
     `credentials_by_server`. The base refuses an overlap between the two halves
     at manifest load, and the classification is what keeps them disjoint.
+
+    `named` limits the tool NAMESPACE to those `(server_id, tool_name)` pairs
+    and leaves everything else (the classifications, the grant classes, the
+    envelope they hash to) as confirmed. A tool the namespace does not name is
+    uncallable whatever the store holds for it, which is what lets a wrap name
+    each tool only once its admission is ratified (`_admit_committed`).
     """
     confirmed = tools_by_server or {}
     environments = env_by_server or {}
@@ -287,10 +344,13 @@ def _synthesize_manifest(
         else:
             declaration["url"] = server.url
         admitted = confirmed.get(server.server_id, [])
-        if admitted:
-            declaration["tools"] = [
-                {"tool_name": definition.tool_name} for definition, _ in admitted
-            ]
+        callable_ = [
+            {"tool_name": definition.tool_name}
+            for definition, _ in admitted
+            if named is None or (server.server_id, definition.tool_name) in named
+        ]
+        if callable_:
+            declaration["tools"] = callable_
         mcp_servers[server.server_id] = declaration
         tool_ops.extend(op.model_dump(mode="json") for _, op in admitted)
 
@@ -346,8 +406,24 @@ def _synthesize_manifest(
 
 
 def _write_manifest(path: Path, payload: dict) -> None:
+    """Replace the manifest whole, or not at all.
+
+    This file decides which tools a call can reach and how each is classified,
+    and a wrap rewrites it after its commit point, where a stop is not rolled
+    back. Half of one could be a manifest in its own right, with a tool's
+    classification cut short; so it is written beside the real one and renamed
+    over it, keeping the permission bits the real one had.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(yaml.safe_dump(payload, sort_keys=True), encoding="utf-8")
+    tmp = path.with_name(path.name + ".tegh-tmp")
+    try:
+        tmp.write_text(yaml.safe_dump(payload, sort_keys=True), encoding="utf-8")
+        if path.exists():
+            tmp.chmod(path.stat().st_mode & 0o7777)
+        tmp.replace(path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 @dataclass(frozen=True)
@@ -379,8 +455,14 @@ def _classify_config_values(
     *,
     prompt: Prompt,
     identity: str,
-) -> Optional[ConfigValueDecisions]:
-    """Ask which literal config values are credentials. `None` refuses the wrap.
+    rewrite: bool = True,
+) -> ConfigValueDecisions:
+    """Ask which literal config values are credentials. Raises to refuse the wrap.
+
+    A refusal here is a `_WrapStopped` like any other, including one that comes
+    after a credential has been written to the map: `wrap_command` puts the map
+    back. `rewrite` is False under `--no-rewrite`, and only changes what is
+    said about where a relocated credential ends up.
 
     Runs BEFORE the manifest is written and before a single ceremony
     subprocess: a wrap that is going to refuse should refuse before it burns an
@@ -440,17 +522,14 @@ def _classify_config_values(
                     field, changed=record.was_decided_about_another_value(field)
                 )
             )
-            try:
-                answer = prompt(
-                    f"     is {field.name} a CREDENTIAL? [Y] yes, relocate it  "
-                    "[n] no, it is configuration: "
-                ).strip().lower()
-            except EOFError:
-                # No one is there to answer. Resolving that to the permissive
-                # side would let a wrap in a script classify a credential as
-                # config with nobody having decided anything.
-                print("     (no input available)")
-                answer = ""
+            # The end of input is not an answer here, in either direction: the
+            # permissive side would classify a credential as config, and the
+            # safe-looking side MOVES one, with nobody having decided anything.
+            # `_answered_or_refused` refuses the wrap instead.
+            answer = prompt(
+                f"     is {field.name} a CREDENTIAL? [Y] yes, relocate it  "
+                "[n] no, it is configuration: "
+            ).strip().lower()
             if answer in ("n", "no"):
                 record.record(field, decided_at=_now(), decided_by=identity)
                 print(f"     -> configuration  {field.coordinate}")
@@ -471,9 +550,7 @@ def _classify_config_values(
     # same one regardless of which transport happens to carry it.
     unrelocatable = [field for field in credentials if not field.is_deliverable]
     if unrelocatable:
-        sys.stdout.flush()  # keep the refusal after the answers when redirected
-        print(f"\nREFUSED: {configvalues.render_refusal(unrelocatable)}", file=sys.stderr)
-        return None
+        raise _WrapStopped(configvalues.render_refusal(unrelocatable), then="")
 
     cleared = configvalues.cleared_digests(fields, record)
     if not pending:
@@ -527,20 +604,25 @@ def _classify_config_values(
                     block, wanted, scope=scope
                 )
             except configvalues.CredentialMoved as exc:
-                print(f"\nREFUSED: {exc}", file=sys.stderr)
-                return None
+                raise _WrapStopped(str(exc), then="") from exc
             for server_id, values in found.items():
                 if (scope, server_id) not in constructed:
                     # A server this wrap does not construct (shadowed, or an
-                    # unrepresentable transport) has nowhere to deliver to.
-                    # Its literal is still displaced, so say so rather than
-                    # relocating a credential no gateway will ever use.
-                    print(
-                        f"\n!! {scope}:{server_id} holds a credential but is not a "
-                        "server this wrap constructs;\n   it is NOT relocated and "
-                        "its definition still moves to tegh's backup."
+                    # unrepresentable transport) has nowhere to deliver to, and
+                    # displacing it would put its literal in tegh's backup. So
+                    # the wrap refuses, rather than relocating a credential no
+                    # gateway will ever use.
+                    raise _WrapStopped(
+                        f"{scope}:{server_id} holds a value you classified as a "
+                        "credential, but it is not a server this wrap constructs "
+                        "(it is shadowed by another scope, or its transport "
+                        "cannot be pinned), so tegh has nowhere to deliver the "
+                        "credential",
+                        then=(
+                            "Remove that server entry, or replace the literal with "
+                            "a ${VAR} reference, then run `tegh wrap` again."
+                        ),
                     )
-                    return None
                 credentials_by_server[server_id] = values
                 store.write_secret_leaf(project, server_id, values)
                 for name in values:
@@ -551,8 +633,14 @@ def _classify_config_values(
             f"\n{moved} credential value(s) moved into "
             f"{store.secrets_path(project)} (0600).\n"
             "They will be delivered to the server at spawn via "
-            "connector_auth.env_map,\nand are removed from your harness config "
-            "by the interposition below."
+            "connector_auth.env_map,\n"
+            + (
+                "and are removed from your harness config by the interposition "
+                "below."
+                if rewrite
+                else "and STAY in your harness config as well, because "
+                "--no-rewrite leaves it untouched."
+            )
         )
 
     # The gate re-reads the config at the END of the wrap; a relocated
@@ -619,12 +707,13 @@ def _report_undelivered_values(
 
 
 def _snapshot_server(
-    store: TeghStore, project: Path, server_id: str, env: dict[str, str]
+    run: Runner, store: TeghStore, project: Path, server_id: str, env: dict[str, str]
 ) -> tuple[Optional[McpServerSnapshot], str]:
     """Capture one server's live advertised set via the base's `snapshot`."""
     out = store.snapshot_path(project, server_id)
     out.parent.mkdir(parents=True, exist_ok=True)
     result = _run_ceremony(
+        run,
         [
             "snapshot",
             "--server-id",
@@ -692,10 +781,14 @@ def _render_snapshot_failure(
         if server.unexpanded_vars:
             lines.append(
                 "      Its config uses a ${...} reference, which tegh does not expand "
-                "— replace it\n      with the literal value and re-run `tegh wrap`, "
-                "which will offer to relocate it."
+                "— replace it\n      with the literal value, and the next `tegh wrap` "
+                "will offer to relocate it."
             )
-    lines.append("   Not wrapped. Fix the server, then re-run `tegh wrap`.")
+    # What to do next depends on how this wrap ends, which is not known yet: a
+    # wrap that reaches no server is rolled back, and one that reaches another
+    # commits and leaves a wrapped project. `_report_rolled_back` and
+    # `_report_wrapped` each give the advice that works from where they end.
+    lines.append("   Not wrapped.")
     return "\n".join(lines)
 
 
@@ -861,21 +954,41 @@ def _warn_about_held_tools(confirmed: list[tuple[McpToolDef, ToolOp]]) -> None:
     )
 
 
-def _admit(
-    store: TeghStore,
-    project: Path,
-    server_id: str,
-    tool_name: str,
-    snapshot_path: Path,
-) -> tuple[bool, str]:
-    """Run propose (maker) then ratify (checker) for ONE tool.
+@dataclass(frozen=True)
+class _Proposal:
+    """One tool's admission, proposed by the maker and not yet ratified."""
 
-    Two subprocesses under two DIFFERENT local identities, because
-    maker≠checker is re-derived per coordinate and the base compares the
-    identity strings. A single combined call does not exist here for the same
-    reason `bulk-admit` does not exist in the base.
+    server_id: str
+    tool_name: str
+    proposal_id: str
+
+    @property
+    def coordinate(self) -> str:
+        return f"{self.server_id}/{self.tool_name}"
+
+    @property
+    def argv(self) -> list[str]:
+        return [
+            "--server-id", self.server_id,
+            "--tool-name", self.tool_name,
+            "--proposal-id", self.proposal_id,
+        ]
+
+
+def _propose(
+    run: Runner, store: TeghStore, project: Path, server_id: str, tool_name: str
+) -> tuple[Optional[_Proposal], str]:
+    """The maker's half of one tool's admission: a PENDING proposal.
+
+    It binds the definition in the snapshot the review was shown. It makes
+    nothing callable: only the checker's ratification writes the row a call is
+    checked against (`_ratify`). One left behind by a wrap that was killed
+    authorises nothing and expires after `_PROPOSAL_TTL_HOURS`; a later wrap
+    proposes again and ratifies its own proposal by id, so a stale one beside
+    it changes nothing.
     """
     propose = _run_ceremony(
+        run,
         [
             "admit-propose",
             "--server-id",
@@ -883,37 +996,94 @@ def _admit(
             "--tool-name",
             tool_name,
             "--from-snapshot",
-            str(snapshot_path),
+            str(store.snapshot_path(project, server_id)),
             "--ttl-hours",
             _PROPOSAL_TTL_HOURS,
         ],
         store.ceremony_env(role="maker", project=project),
     )
     if propose.returncode != 0:
-        return False, (propose.stdout + propose.stderr).strip()
+        return None, (propose.stdout + propose.stderr).strip()
 
     proposal_id = ""
     for line in propose.stdout.splitlines():
         if "proposal_id=" in line:
             proposal_id = line.split("proposal_id=", 1)[1].split()[0].strip()
     if not proposal_id:
-        return False, f"could not read a proposal_id from: {propose.stdout.strip()}"
+        return None, f"could not read a proposal_id from: {propose.stdout.strip()}"
+    return _Proposal(server_id, tool_name, proposal_id), ""
 
+
+def _ratify(run: Runner, store: TeghStore, project: Path, proposal: _Proposal) -> str:
+    """The checker's half: the admitted row. Returns what went wrong, or "".
+
+    A second subprocess under a DIFFERENT local identity from `_propose`,
+    because maker≠checker is re-derived per coordinate and the base compares
+    the identity strings. A single combined call does not exist here for the
+    same reason `bulk-admit` does not exist in the base.
+    """
     ratify = _run_ceremony(
-        [
-            "admit-ratify",
-            "--server-id",
-            server_id,
-            "--tool-name",
-            tool_name,
-            "--proposal-id",
-            proposal_id,
-        ],
+        run,
+        ["admit-ratify", *proposal.argv],
         store.ceremony_env(role="checker", project=project),
     )
-    if ratify.returncode != 0:
-        return False, (ratify.stdout + ratify.stderr).strip()
-    return True, ""
+    return "" if ratify.returncode == 0 else (ratify.stdout + ratify.stderr).strip()
+
+
+def _withdraw(
+    run: Runner, store: TeghStore, project: Path, proposals: Sequence[_Proposal]
+) -> int:
+    """Burn proposals a stopped wrap will never ratify. Returns how many went.
+
+    The base's `admit-reject`, which can only narrow: a rejected proposal can
+    never be ratified. One that could not be burned is left to expire
+    (`_PROPOSAL_TTL_HOURS`), and authorises nothing in the meantime.
+    """
+    withdrawn = 0
+    for proposal in proposals:
+        rejected = _run_ceremony(
+            run,
+            ["admit-reject", *proposal.argv],
+            store.ceremony_env(role="checker", project=project),
+        )
+        withdrawn += rejected.returncode == 0
+    return withdrawn
+
+
+
+def _said_last(output: str) -> str:
+    """The line of a ceremony's output that says what went wrong.
+
+    A ceremony that refuses says so in one line that starts `REFUSED:` or
+    `ERROR:`. One that crashes prints a Python traceback, whose last line is
+    the error and whose other lines are the base's source. Either way it is
+    one line, and it is the one a person can act on.
+    """
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    named = [line for line in lines if line.startswith(("REFUSED:", "ERROR:"))]
+    return (named or lines or ["it exited without saying why"])[-1]
+
+
+def _ceremony_failed(what: str, output: str) -> _WrapStopped:
+    """A ceremony that did not finish, as the one line a stopped wrap prints.
+
+    The whole of what the child said goes to stdout first, with the rest of
+    what this wrap printed, and the line names where to look: a traceback
+    belongs in front of whoever will report it, not inside a sentence.
+    """
+    said = output.strip()
+    if len(said.splitlines()) > 1:
+        print(f"\n!! {what} failed. It said:")
+        print("\n".join(f"     {line}" for line in said.splitlines()))
+        seen = " (all it said is printed above)"
+    else:
+        seen = ""
+    return _WrapStopped(
+        f"{what} failed: {_said_last(said)}{seen}",
+        then="Run `tegh wrap` again once what it reported is put right.",
+        label="FAILED",
+        status=1,
+    )
 
 
 def _already_wrapped(result: DiscoveryResult, project: Path) -> Optional[str]:
@@ -968,7 +1138,341 @@ def _already_wrapped(result: DiscoveryResult, project: Path) -> Optional[str]:
     return None
 
 
-def wrap_command(args: argparse.Namespace, *, prompt: Prompt = input) -> int:
+def _displaced_by_an_earlier_wrap(store: TeghStore, project: Path) -> Optional[str]:
+    """The refusal for a project that has a wrap backup and no gateway entry.
+
+    None when there is no backup. A backup with the gateway entry still in the
+    config is `_already_wrapped`, checked first; this is what is left when the
+    entry was taken out by hand, or when a wrap was cut off between writing
+    its backup and rewriting the config. Either way the backup is the only
+    record of the servers that wrap displaced, and the only thing that says
+    which credentials in tegh's store are theirs. A wrap never writes over it:
+    `tegh unwrap` restores from it and removes it, and then a wrap can run.
+    """
+    backup_path = store.backup_path(project)
+    if not backup_path.exists():
+        return None
+    return (
+        f"an earlier wrap of {project} left a backup at {backup_path}, and the "
+        "harness config no longer runs tegh's gateway for this project (the "
+        "entry was removed by hand, or that wrap was cut off before it "
+        "finished). That backup is the only record of the servers the earlier "
+        "wrap displaced, and wrapping now would replace it. Nothing was "
+        "changed. Restore them first with `tegh unwrap --project "
+        f"{_path(project)} --home {_path(store.home)}`, then run `tegh wrap` again."
+    )
+
+
+class _WrapStopped(Exception):
+    """A wrap that cannot go on, in the words the person will read.
+
+    Raised from anywhere between a wrap's first write and its last, and never
+    reported where it is raised. Before the commit point `wrap_command` rolls
+    the wrap back and says so, in one place, for every one of them; after it,
+    `_admit_committed` reports how far the wrap got. `why` is what stopped it
+    and `then` is what to do next.
+    """
+
+    def __init__(self, why: str, *, then: str, label: str = "REFUSED", status: int = 2):
+        super().__init__(why)
+        self.why = why
+        self.then = then
+        self.label = label
+        self.status = status
+
+
+@dataclass
+class _WrapProgress:
+    """How far a wrap got, for the report of whichever way it ended."""
+
+    #: Servers that could not be asked for their tools, and so are not wrapped.
+    unreachable: list[DiscoveredServer] = dc_field(default_factory=list)
+    #: Every admission this wrap proposed, in the order it will ratify them.
+    proposed: list[_Proposal] = dc_field(default_factory=list)
+    #: Those ratified AND named in the manifest: what a call can reach.
+    served: list[_Proposal] = dc_field(default_factory=list)
+    #: How many unratified proposals a stopped wrap burned; None before it tried.
+    withdrawn: Optional[int] = None
+    #: The exit status of a wrap that was rolled back, set by its report.
+    status: int = 1
+
+    @property
+    def waiting(self) -> list[_Proposal]:
+        """Proposed and not served: not callable, whether or not ratified."""
+        return [proposal for proposal in self.proposed if proposal not in self.served]
+
+
+@dataclass(frozen=True)
+class _PreparedWrap:
+    """Everything a wrap decided, with nothing of it committed yet."""
+
+    lock: TeghLock
+    decisions: ConfigValueDecisions
+    #: None under `--no-rewrite`: the harness config is deliberately left alone.
+    plan: Optional[interpose.InterposePlan]
+    #: The confirmed manifest, naming only the tools it is given.
+    manifest_naming: Callable[[Collection[tuple[str, str]]], dict]
+
+
+def _map_leaves(payload: object) -> object:
+    """What a credential map holds, so two of them compare by content.
+
+    A wrap creates an empty map for the snapshot whether or not it relocates
+    anything, and taking that away again undoes no credential: a map that is
+    absent and a map that is empty hold the same thing. One that does not parse
+    compares by its bytes.
+    """
+    if not isinstance(payload, bytes):
+        return {}
+    try:
+        return json.loads(payload)
+    except ValueError:
+        return payload
+
+
+def _as_stopped(stopped: Optional[BaseException]) -> _WrapStopped:
+    """Whatever ended a wrap, as the refusal or failure it is reported as."""
+    if isinstance(stopped, _WrapStopped):
+        return stopped
+    if isinstance(stopped, _InputEnded):
+        return _WrapStopped(
+            "input ended before this wrap's questions were answered; the one "
+            f"left open was `{stopped}`, and silence is not an answer to any of them",
+            then=(
+                "Run `tegh wrap` again from a terminal and answer each question. "
+                "(--admit-all answers the per-tool questions in advance; only a "
+                "person answers whether a value is a credential.)"
+            ),
+        )
+    if isinstance(stopped, KeyboardInterrupt):
+        # The status a shell gives a process a signal ended: 128 and its number.
+        return _WrapStopped(
+            "tegh wrap was stopped before it finished",
+            then="Run `tegh wrap` again when you are ready.",
+            label="INTERRUPTED",
+            status=128 + stopped.number
+            if isinstance(stopped, Stopped)
+            else unwrap.EXIT_INTERRUPTED,
+        )
+    if isinstance(stopped, (interpose.InterposeError, TeghStoreError)):
+        # Refusals written to be acted on; each already says what to do.
+        return _WrapStopped(str(stopped), then="")
+    # Not a refusal anybody wrote. The error's own text goes through, because
+    # it is the only account of what happened that exists.
+    described = f"{type(stopped).__name__}: {stopped}" if stopped else "no error"
+    return _WrapStopped(
+        f"tegh wrap stopped on an error it did not expect ({described})",
+        then=(
+            "Run `tegh wrap` again; if it stops the same way, that error is the "
+            "thing to report."
+        ),
+        label="FAILED",
+        status=1,
+    )
+
+
+def _path(path: Path | str) -> str:
+    """A path as a shell takes it: quoted when it holds a space or the like."""
+    return shlex.quote(str(path))
+
+
+def _with_home(args: argparse.Namespace, store: TeghStore) -> str:
+    """` --home <path>` for a printed command, when this one was given `--home`.
+
+    A command tegh prints is followed word for word. One that left the flag
+    off would look in `$TEGH_HOME` or `~/.tegh`, find no wrap there, and
+    refuse.
+    """
+    return f" --home {_path(store.home)}" if args.home else ""
+
+
+def _wrap_again(args: argparse.Namespace, store: TeghStore, project: Path) -> str:
+    """This wrap as a command to run again, with every flag that says WHERE."""
+    said = f"tegh wrap {args.harness} --project {_path(project)}"
+    if args.harness_home:
+        said += f" --harness-home {_path(args.harness_home)}"
+    if args.no_rewrite:
+        said += " --no-rewrite"
+    return said + _with_home(args, store)
+
+
+def _left_running(transaction: WrapTransaction) -> str:
+    """What a stopped wrap could not stop, as a sentence; empty when it stopped all."""
+    said = ""
+    if transaction.not_stopped:
+        pids = ", ".join(str(pid) for pid in transaction.not_stopped)
+        said += (
+            " tegh could not stop every process this wrap started, and these may "
+            f"still be running: pid {pids}."
+        )
+    for failed in transaction.steps_failed:
+        said += (
+            " A step of putting things back raised an error of its own "
+            f"({type(failed).__name__}: {failed})."
+        )
+    return said
+
+
+def _say(line: str) -> None:
+    """The one line a stopped wrap ends on. A terminal that has gone is not an error."""
+    try:
+        sys.stdout.flush()  # what the wrap printed stays ahead of why it stopped
+        print(line, file=sys.stderr)
+        sys.stderr.flush()
+    except OSError:
+        pass  # SIGHUP: there is nobody left to tell
+
+
+def _withdrawn(progress: _WrapProgress) -> str:
+    """What became of the proposals a stopped wrap never ratified, as a sentence."""
+    waiting = len(progress.waiting)
+    if not waiting:
+        return ""
+    left = waiting - (progress.withdrawn or 0)
+    became = (
+        "were withdrawn"
+        if not left
+        else f"expire within {_PROPOSAL_TTL_HOURS} hour(s) ({left} could not be withdrawn)"
+    )
+    return (
+        f" The {waiting} admission proposal(s) it had made and not ratified "
+        f"{became}; a proposal makes no tool callable."
+    )
+
+
+def _report_rolled_back(
+    transaction: WrapTransaction,
+    store: TeghStore,
+    project: Path,
+    progress: _WrapProgress,
+    args: argparse.Namespace,
+) -> None:
+    """Say that a wrap stopped, why, and that what it wrote is put back.
+
+    One line on stderr, whatever stopped it, printed as the last step of the
+    rollback and inside its hold (`transaction.py`, "Signals"), so no signal
+    can put another line in its place. A stopped wrap has usually moved a
+    credential into tegh's store (the snapshot spawns the real server, which
+    will not start without it) and rewritten the project's manifest with an
+    empty tool namespace for the review, and may have got as far as the lock
+    and the harness config. All of that was put back to the byte before this
+    is printed, and the message names it.
+
+    Nothing else needs putting back. A wrap stopped before its commit point
+    has ratified no admission and issued no grant: what it wrote to tegh's
+    store is proposals, which make nothing callable.
+
+    A rollback that could not put every file back is FAILED whatever stopped
+    the wrap, and says what is left and the command that deals with it.
+    """
+    stopped = _as_stopped(transaction.stopped_by)
+    # One line: a refusal written as a paragraph is joined, and nothing else
+    # about its spacing is touched (it may quote a question as it was asked).
+    why = re.sub(r"\s*\n\s*", " ", stopped.why.strip()).rstrip(".")
+    then = f" {stopped.then}" if stopped.then else ""
+    secrets_path = store.secrets_path(project)
+    running = _left_running(transaction)
+    proposals = _withdrawn(progress)
+
+    if transaction.not_restored:
+        could_not = "; ".join(
+            f"{path} ({reason})" for path, reason in transaction.not_restored
+        )
+        failed = {path for path, _ in transaction.not_restored}
+        if secrets_path in failed:
+            kept = (
+                f" {secrets_path} may still hold a copy of the credential value(s) "
+                "this wrap moved into it; remove them from that file by hand, or "
+                "finish a wrap."
+            )
+        elif store.backup_path(project).exists():
+            # A harness config would not go back, so the rest was left alone.
+            kept = (
+                " The wrap backup and the credential map were left as this wrap "
+                "wrote them, because they are what restores that config: run "
+                f"`tegh unwrap --project {_path(project)} --home {_path(store.home)}`."
+            )
+        else:
+            kept = ""
+        progress.status = 1
+        _say(
+            f"\nFAILED: {why}, and tegh could not put back every file this wrap "
+            f"wrote: {could_not}.{kept}{proposals}{running}{then}"
+        )
+        return
+
+    undone = ""
+    if secrets_path in transaction.found_changed and _map_leaves(
+        transaction.found_changed[secrets_path]
+    ) != _map_leaves(transaction.before(secrets_path)):
+        undone = (
+            f" The credential value(s) this wrap had moved into {secrets_path} are "
+            "undone: that file "
+            + (
+                "did not exist before this wrap and was removed again."
+                if transaction.before(secrets_path) is None
+                else "was put back, byte for byte, to what it held before this wrap."
+            )
+        )
+    progress.status = stopped.status
+    _say(
+        f"\n{stopped.label}: {why}. Nothing was wrapped: your harness config, "
+        "tegh.lock and its signature, and tegh's wrap backup, credential map, "
+        "manifest, server snapshots and config-value decisions for this project "
+        "are as they were before this command, and no tool was admitted."
+        f"{undone}{proposals}{running}{then}"
+    )
+
+
+def _report_part_admitted(
+    transaction: WrapTransaction,
+    stopped_by: BaseException,
+    prepared: _PreparedWrap,
+    progress: _WrapProgress,
+    args: argparse.Namespace,
+    *,
+    store: TeghStore,
+    project: Path,
+) -> int:
+    """Say how far a wrap got that stopped AFTER its commit point.
+
+    Nothing is put back from here: the admissions already ratified cannot be,
+    and the files beside them are what makes them safe. So the line says what
+    is true now. The project is wrapped. Each tool is either admitted and
+    served or it is not callable, by name. And there is one way on, which
+    works from every such state: unwrap, then wrap again. Under `--no-rewrite`
+    there is nothing to unwrap, and it is the wrap alone.
+    """
+    stopped = _as_stopped(stopped_by)
+    why = re.sub(r"\s*\n\s*", " ", stopped.why.strip()).rstrip(".")
+    served = ", ".join(proposal.coordinate for proposal in progress.served) or "none"
+    waiting = ", ".join(proposal.coordinate for proposal in progress.waiting) or "none"
+    again = _wrap_again(args, store, project)
+    if prepared.plan is None:
+        state = (
+            f"tegh.lock and tegh's own files for {project} are written and the "
+            "harness config was left alone (--no-rewrite)"
+        )
+        finish = f"To finish, run `{again}`."
+    else:
+        state = f"{project} IS wrapped, and its harness config runs tegh's gateway"
+        finish = (
+            f"To undo it, run `tegh unwrap --project {_path(project)}"
+            f"{_with_home(args, store)}`, which puts your servers back; to "
+            f"finish, run that and then `{again}`."
+        )
+    _say(
+        f"\n{stopped.label}: {why}, after the point where a wrap can still be put "
+        f"back. {state}, but only {len(progress.served)} of {len(progress.proposed)} "
+        f"tool(s) were admitted. Admitted and served: {served}. NOT admitted, and "
+        f"refused if called: {waiting}. This wrap serves no tool you did not "
+        "review, and the tegh.lock it wrote pins the definition of each one it serves."
+        f"{_withdrawn(progress)}{_left_running(transaction)} {finish}"
+    )
+    return stopped.status
+
+
+def wrap_command(args: argparse.Namespace, *, prompt: Prompt = _ask) -> int:
     harness = HARNESS_ALIASES[args.harness]
     adapter = ADAPTERS[harness]
     project = Path(args.project).expanduser().resolve()
@@ -991,8 +1495,11 @@ def wrap_command(args: argparse.Namespace, *, prompt: Prompt = input) -> int:
         print(findings_text)
 
     # Before the findings are weighed and long before the review: no flag makes
-    # a second wrap of a wrapped project mean anything but pinning the gateway.
-    refusal = _already_wrapped(result, project)
+    # a second wrap of a wrapped project mean anything but pinning the gateway,
+    # and none makes replacing an earlier wrap's backup safe.
+    refusal = _already_wrapped(result, project) or _displaced_by_an_earlier_wrap(
+        store, project
+    )
     if refusal is not None:
         print(f"\nREFUSED: {refusal}", file=sys.stderr)
         return 2
@@ -1020,27 +1527,107 @@ def wrap_command(args: argparse.Namespace, *, prompt: Prompt = input) -> int:
         print("\nNothing to wrap: no server this harness loads can be pinned.")
         return 1
 
+    # Everything above only read. From here a wrap writes, in two parts with a
+    # COMMIT POINT between them.
+    #
+    # Before it, the wrap writes files and proposals. The `with` puts every
+    # file back for whatever leaves it early (a refusal, the end of input, a
+    # signal, a failed ceremony, an error nobody expected) and reports once;
+    # no exit inside has a rollback or a report of its own. A proposal makes
+    # nothing callable, so files are all there is to put back.
+    #
+    # After it (`_admit_committed`), the wrap writes what cannot be taken
+    # back: the grants and the ratified admissions. Nothing is rolled back
+    # from there. A wrap stopped there reports what is admitted and what is
+    # not, and the files written before the commit point are what keep every
+    # such state inside what was reviewed.
+    lock_path, signature_path = lock_paths(project)
+    transaction = WrapTransaction()
+    # Each file a wrap writes, recorded as it is now. The harness configs are
+    # the exception: `_write_wrap` records them at the moment it writes them.
+    transaction.record(
+        store.config_decisions_path(project),
+        store.secrets_path(project),
+        store.manifest_path(project),
+        *(store.snapshot_path(project, server.server_id) for server in lockable),
+        lock_path,
+        signature_path,
+        store.backup_path(project),
+    )
+    progress = _WrapProgress()
+
+    def _withdraw_proposals() -> None:
+        progress.withdrawn = _withdraw(transaction.run, store, project, progress.waiting)
+
+    # Before the files go back, because a ceremony's environment creates the
+    # credential map when there is none, and the rollback then removes it.
+    transaction.on_rollback(_withdraw_proposals)
+    transaction.after_rollback(
+        lambda: _report_rolled_back(transaction, store, project, progress, args)
+    )
+    status = 0
+    with stops_like_ctrl_c(), transaction:
+        prepared = _prepare_wrap(
+            transaction,
+            progress,
+            args,
+            store=store,
+            project=project,
+            harness=harness,
+            adapter=adapter,
+            result=result,
+            lockable=lockable,
+            harness_home=harness_home,
+            prompt=_answered_or_refused(prompt),
+        )
+        _write_wrap(transaction, prepared, args, store=store, project=project, harness=harness)
+        status = _admit_committed(
+            transaction, prepared, progress, args, store=store, project=project
+        )
+    return status if transaction.committed else progress.status
+
+
+def _prepare_wrap(
+    transaction: WrapTransaction,
+    progress: _WrapProgress,
+    args: argparse.Namespace,
+    *,
+    store: TeghStore,
+    project: Path,
+    harness: Harness,
+    adapter,
+    result: DiscoveryResult,
+    lockable: Sequence[DiscoveredServer],
+    harness_home: Optional[Path],
+    prompt: Prompt,
+) -> _PreparedWrap:
+    """Classify, snapshot, review, propose each admission, and plan the rewrite.
+
+    Returns only when every decision is made and every check has passed, with
+    the lock and the harness config still unwritten and nothing admitted.
+    Every other way out is a raise, which `wrap_command` turns into a rollback.
+    """
     identity = f"local-solo:{store.issuer_key_id()}"
 
     # Which literal config values are credentials is a human's call, and
     # it is asked HERE — before the manifest, before the first ceremony
-    # subprocess — because a wrap that will refuse must refuse before it burns
-    # an admission. Reading the sites now also moves the format round-trip
+    # subprocess — because a wrap that will refuse must refuse before it makes
+    # a proposal. Reading the sites now also moves the format round-trip
     # refusal to the same early point.
     sites, gateway_site = adapter.config_sites(project, home=harness_home)
-    try:
-        decisions = _classify_config_values(
-            store, project, sites, lockable, prompt=prompt, identity=identity
-        )
-    except interpose.InterposeError as exc:
-        print(f"\nREFUSED: {exc}", file=sys.stderr)
-        return 2
-    if decisions is None:
-        return 2
+    decisions = _classify_config_values(
+        store,
+        project,
+        sites,
+        lockable,
+        prompt=prompt,
+        identity=identity,
+        rewrite=not args.no_rewrite,
+    )
 
-    # Key #1, first pass: connection config only. The tool namespace is empty
-    # until a human confirms one — the ceremony must never be able to read a
-    # namespace that discovery alone produced.
+    # Key #1, first pass: connection config only. The tool namespace is
+    # empty until a human confirms one — the ceremony must never be able to
+    # read a namespace that discovery alone produced.
     manifest_path = store.manifest_path(project)
     _write_manifest(
         manifest_path,
@@ -1054,11 +1641,13 @@ def wrap_command(args: argparse.Namespace, *, prompt: Prompt = input) -> int:
         ),
     )
 
-    snapshot_env = store.ceremony_env(role="maker", project=project)
     confirmed: dict[str, list[tuple[McpToolDef, ToolOp]]] = {}
     reachable: list[DiscoveredServer] = []
+    snapshot_env = store.ceremony_env(role="maker", project=project)
     for server in lockable:
-        snapshot, error = _snapshot_server(store, project, server.server_id, snapshot_env)
+        snapshot, error = _snapshot_server(
+            transaction.run, store, project, server.server_id, snapshot_env
+        )
         if snapshot is None:
             print(
                 _render_snapshot_failure(
@@ -1072,6 +1661,7 @@ def wrap_command(args: argparse.Namespace, *, prompt: Prompt = input) -> int:
                     ),
                 )
             )
+            progress.unreachable.append(server)
             continue
         reachable.append(server)
         confirmed[server.server_id] = _review_server(
@@ -1079,13 +1669,31 @@ def wrap_command(args: argparse.Namespace, *, prompt: Prompt = input) -> int:
         )
 
     if not reachable:
-        print("\nNo server could be reached; nothing was admitted and no lock written.")
-        return 1
+        raise _WrapStopped(
+            "no server could be reached, so there was nothing to review or admit",
+            then="Fix what each server said above, then run `tegh wrap` again.",
+            label="NOT WRAPPED",
+            status=1,
+        )
+    if not any(confirmed.values()):
+        # Asked before the first ceremony, so a wrap that admits nothing leaves
+        # no proposal behind it either.
+        raise _WrapStopped(
+            "no tool was admitted, and a gateway that serves no tools would take "
+            "your servers out of the harness config and give nothing back",
+            then=(
+                "Run `tegh wrap` again and answer [y] for each tool you want "
+                "(--admit-all answers for all of them)."
+            ),
+            label="NOT WRAPPED",
+            status=1,
+        )
 
-    # Key #1, second pass: the CONFIRMED namespace and classifications.
-    _write_manifest(
-        manifest_path,
-        _synthesize_manifest(
+    # Key #1, second pass: the CONFIRMED namespace and classifications. Built
+    # here and not written yet: `_write_wrap` and `_admit_committed` write it,
+    # and say which tools it names at each write.
+    def manifest_naming(named: Collection[tuple[str, str]]) -> dict:
+        return _synthesize_manifest(
             reachable,
             polarity=args.polarity,
             project=project,
@@ -1093,58 +1701,107 @@ def wrap_command(args: argparse.Namespace, *, prompt: Prompt = input) -> int:
             tools_by_server=confirmed,
             env_by_server=decisions.env_by_server,
             credentials_by_server=decisions.credentials_by_server,
-        ),
-    )
+            named=named,
+        )
 
+    # The maker's half of every admission, all of them before any file of the
+    # commit is written: a proposal the ceremony refuses is a wrap that would
+    # pin less than was agreed to, and here it is still a clean rollback.
     print("\n" + "=" * 78)
-    print("ADMITTING (maker -> checker, one ceremony per tool)")
+    print("PROPOSING (maker; nothing is admitted until the checker ratifies)")
     print("=" * 78)
-    admitted: dict[str, list[McpToolDef]] = {}
     for server in reachable:
         for tool_def, _op in confirmed[server.server_id]:
-            ok, error = _admit(
-                store,
-                project,
-                server.server_id,
-                tool_def.tool_name,
-                store.snapshot_path(project, server.server_id),
-            )
             coordinate = f"{server.server_id}/{tool_def.tool_name}"
-            if ok:
-                print(f"  admitted  {coordinate}")
-                admitted.setdefault(server.server_id, []).append(tool_def)
-            else:
-                print(f"  FAILED    {coordinate}: {error}")
+            proposal, error = _propose(
+                transaction.run, store, project, server.server_id, tool_def.tool_name
+            )
+            if proposal is None:
+                raise _ceremony_failed(f"the admission proposal for {coordinate}", error)
+            progress.proposed.append(proposal)
+            print(f"  proposed  {coordinate}")
 
     stamped = _now()
     servers: list[LockedServer] = []
     for server in reachable:
-        try:
-            locked = server.to_locked_server(harness)
-        except UnrepresentableTransportError as exc:  # pragma: no cover — filtered above
-            print(f"  !! {exc}")
-            continue
+        locked = server.to_locked_server(harness)
         locked.admitted = [
             LockedTool(
                 tool_def=tool_def,
                 def_hash=compute_tool_def_hash(tool_def),
-                tool_op=next(
-                    op for definition, op in confirmed[server.server_id]
-                    if definition.tool_name == tool_def.tool_name
-                ),
+                tool_op=tool_op,
                 attestation=LockAttestation(
                     kind=AttestationKind.SOLO_ATTESTED,
                     admitted_by=identity,
                     admitted_at=stamped,
                 ),
             )
-            for tool_def in admitted.get(server.server_id, [])
+            for tool_def, tool_op in confirmed[server.server_id]
         ]
         servers.append(locked)
 
-    lock = TeghLock(
-        format_version=LOCK_FORMAT_VERSION, generated_at=stamped, servers=servers
+    # The last thing that can refuse, and it only reads: the gate re-reads every
+    # site and compares each literal with what was classified.
+    plan = None
+    if not args.no_rewrite:
+        plan = interpose.plan_interposition(
+            sites=sites,
+            gateway_site=gateway_site,
+            gateway_entry=adapter.gateway_entry(
+                project, launcher=tegh_launcher(), home=store.home
+            ),
+            unwritable=adapter.unwritable_sources(result),
+            cleared_config=decisions.cleared,
+        )
+    return _PreparedWrap(
+        lock=TeghLock(
+            format_version=LOCK_FORMAT_VERSION, generated_at=stamped, servers=servers
+        ),
+        decisions=decisions,
+        plan=plan,
+        manifest_naming=manifest_naming,
     )
+
+
+def _write_wrap(
+    transaction: WrapTransaction,
+    prepared: _PreparedWrap,
+    args: argparse.Namespace,
+    *,
+    store: TeghStore,
+    project: Path,
+    harness: Harness,
+) -> None:
+    """Write the files of a prepared wrap: manifest, lock, backup, config.
+
+    In that order, with the harness config LAST, and all of it before the
+    commit point: an error or a signal between two of these is rolled back
+    like any other. What the order is for is the stop nothing can roll back,
+    the process killed outright or the machine lost, and what each such stop
+    leaves:
+
+    - after the manifest: it carries the confirmed classifications and grant
+      classes and names NO tool, as it has since the review began. A tool the
+      manifest does not name is uncallable whatever the store holds, so no
+      call for this project executes. tegh's other files are part-written (a
+      relocated credential is in the credential map as well as the config),
+      and the next `tegh wrap` starts over and overwrites them.
+    - after the lock: the same, beside a lock that pins what was reviewed.
+      Still no call executes; the next `tegh wrap` replaces the lock.
+    - after the backup, with the config not yet or only partly rewritten: the
+      backup holds every server definition as it was. The next `tegh wrap`
+      refuses and names `tegh unwrap` (`_displaced_by_an_earlier_wrap`), which
+      restores each site from the backup, puts the credentials back, and
+      leaves a project a wrap can then run on.
+
+    The backup going to disk before the first site is written is what makes
+    the third case recoverable: the other order has an instant at which the
+    servers are out of the config and recorded nowhere. And the lock going to
+    disk before the commit point is what lets `_admit_committed` promise that
+    no tool is ever callable at a definition the lock on disk does not pin.
+    """
+    _write_manifest(store.manifest_path(project), prepared.manifest_naming(()))
+
     # TL2/TL3: sign with the tegh home's issuer key unless the operator has
     # deliberately asked for an unsigned lock. `--allow-unsigned` SUPPRESSES the
     # signer rather than merely tolerating a missing one, so the flag means the
@@ -1153,134 +1810,79 @@ def wrap_command(args: argparse.Namespace, *, prompt: Prompt = input) -> int:
     signer = None if args.allow_unsigned else signer_from_pem(
         store.issuer_key_id(), store.issuer_signing_pem()
     )
-    try:
-        lock_path, signature_path = write_lock(
-            lock, project=project, signer=signer, allow_unsigned=args.allow_unsigned
-        )
-    except UnsignedLockRefused as exc:  # pragma: no cover — unreachable above
-        print(f"\nREFUSED: {exc}", file=sys.stderr)
-        return 2
-
-    total = sum(len(server.admitted) for server in servers)
-    print(f"\nwrote {lock_path} — {total} tool(s) pinned across {len(servers)} server(s)")
-    if signature_path is None:
-        print("  UNSIGNED (--allow-unsigned): this lock carries no evidence of origin.")
-    else:
-        print(f"  signed by {store.issuer_key_id()} -> {signature_path.name}")
-
-    if total == 0:
-        print(
-            "\nNothing was admitted, so the config is left alone: interposing a "
-            "gateway that serves no tools would remove the user's servers and "
-            "give nothing back."
-        )
-        return 0
-
-    if not _seed_grants(store, project):
-        return 2
-    return _interpose(
-        store,
-        project,
-        harness,
-        adapter,
-        result,
-        sites=sites,
-        gateway_site=gateway_site,
-        cleared_config=decisions.cleared,
-        relocated=decisions.relocated,
-        skip=args.no_rewrite,
+    write_lock(
+        prepared.lock, project=project, signer=signer, allow_unsigned=args.allow_unsigned
     )
+    plan = prepared.plan
+    if plan is None:
+        return
 
-
-def _seed_grants(store: TeghStore, project: Path) -> bool:
-    """Issue the floor grants for this project's admitted coordinates.
-
-    The gateway advertises `served_registry()`, which is built from GRANTS —
-    admission alone makes a tool callable, it does not make it served. Before
-    this step a wrapped project got a gateway that advertised nothing and denied
-    everything, which is how interposing the gateway turned out to be more than a config rewrite.
-
-    The base's ceremony does the writing, as ever: `seed` creates each grant with
-    a bootstrap-typed, issuer-signed ledger record beside it, and never
-    overwrites an existing one (so re-wrapping is idempotent rather than a
-    silent re-mint).
-    """
-    # `ceremony_env` is the ADMISSION ceremony's environment and deliberately
-    # names no manifest — MCP admission does not read one. The grant ceremony
-    # does: it derives the principal, the granted classes and the envelope hash
-    # from the manifest the operator NAMED, and refuses to default it.
-    env = store.ceremony_env(role="maker", project=project)
-    env["BROKER_MANIFEST"] = str(store.manifest_path(project))
-    seed = subprocess.run(  # noqa: S603 — fixed argv, no shell
-        python_module_argv("safe_agents.broker.grants.commands", "seed"),
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-    if seed.returncode != 0:
-        print(
-            f"\nREFUSED: could not issue grants for this project's admitted tools:\n"
-            f"{(seed.stdout + seed.stderr).strip()}",
-            file=sys.stderr,
-        )
-        return False
-    print(f"\ngrants issued for the admitted coordinates (store: {store.db_path})")
-    return True
-
-
-def _interpose(
-    store: TeghStore,
-    project: Path,
-    harness: Harness,
-    adapter,
-    result: DiscoveryResult,
-    *,
-    sites: Sequence[interpose.ConfigSite],
-    gateway_site: interpose.ConfigSite,
-    cleared_config: Mapping[str, str],
-    relocated: Mapping[str, str],
-    skip: bool,
-) -> int:
-    """Point the harness at the gateway, and record what was displaced.
-
-    The sites are passed in rather than re-resolved: they were already read to
-    classify this wrap's literal config values, and resolving them twice
-    would let the classification and the gate disagree about which files are in
-    play.
-    """
-    if skip:
-        print(
-            "\n--no-rewrite: the harness config was NOT touched, so the wrapped "
-            "agent still reaches its original servers directly. The lock records "
-            "what WOULD be pinned; nothing is interposed."
-        )
-        return 0
-
-    try:
-        plan = interpose.plan_interposition(
-            sites=sites,
-            gateway_site=gateway_site,
-            gateway_entry=adapter.gateway_entry(
-                project, launcher=tegh_launcher(), home=store.home
-            ),
-            unwritable=adapter.unwritable_sources(result),
-            cleared_config=cleared_config,
-        )
-    except interpose.InterposeError as exc:
-        print(f"\nREFUSED: {exc}", file=sys.stderr)
-        return 2
-
-    backup = interpose.apply_interposition(
+    backup = interpose.backup_of(
         plan,
         wrapped_at=_now(),
         project=project,
         harness=harness.value,
-        relocated=relocated,
+        relocated=prepared.decisions.relocated,
     )
     backup_path = store.backup_path(project)
     backup_path.parent.mkdir(parents=True, exist_ok=True)
     backup_path.write_text(backup.to_json(), encoding="utf-8")
 
+    # Recorded NOW and not when the wrap began: the harness writes its own
+    # state into these files while a wrap waits at its questions, and a
+    # rollback must undo this write and nothing of the harness's. Put back
+    # before anything else, because the credentials they held are otherwise
+    # only in the credential map this same rollback empties (`transaction.py`).
+    transaction.record(
+        *dict.fromkeys(site.path for site in plan.sites), restore_first=True
+    )
+    interpose.write_interposition(plan)
+
+
+def _report_wrapped(
+    prepared: _PreparedWrap,
+    progress: _WrapProgress,
+    args: argparse.Namespace,
+    *,
+    store: TeghStore,
+    project: Path,
+) -> None:
+    """Say what a committed wrap wrote, and what it left for the person to do."""
+    lock_path, signature_path = lock_paths(project)
+    servers = prepared.lock.servers
+    total = sum(len(server.admitted) for server in servers)
+    print(f"\nwrote {lock_path} — {total} tool(s) pinned across {len(servers)} server(s)")
+    if args.allow_unsigned:
+        print("  UNSIGNED (--allow-unsigned): this lock carries no evidence of origin.")
+    else:
+        print(f"  signed by {store.issuer_key_id()} -> {signature_path.name}")
+
+    plan = prepared.plan
+    unreachable = ", ".join(server.server_id for server in progress.unreachable)
+    if plan is None:
+        print(
+            "\n--no-rewrite: the harness config was NOT touched, so the wrapped "
+            "agent still reaches its original servers directly. The lock records "
+            "what WOULD be pinned; nothing is interposed."
+        )
+        moved = sum(
+            len(values) for values in prepared.decisions.credentials_by_server.values()
+        )
+        if moved:
+            print(
+                f"\n  !! {moved} credential value(s) are now in TWO places: your "
+                "harness config, where --no-rewrite left them,\n     and "
+                f"{store.secrets_path(project)},\n     where this wrap copied "
+                "them. A wrap without --no-rewrite takes them out of the config."
+            )
+        if unreachable:
+            print(
+                f"\n  !! not wrapped, because it could not be reached: {unreachable}\n"
+                "     Fix it, then run `tegh wrap` again."
+            )
+        return
+
+    backup_path = store.backup_path(project)
     print("\n" + "=" * 78)
     print("INTERPOSED")
     print("=" * 78)
@@ -1299,9 +1901,135 @@ def _interpose(
             f"\n  !! {source.scope.value}: {source.detail}\n"
             "     The gateway is NOT this harness's only MCP server while that holds."
         )
-    print("\nSee what the broker records: tegh audit --verify --project " + str(project))
-    print("Restore with: tegh unwrap --project " + str(project))
-    return 0
+    if unreachable:
+        # The project is wrapped now, so "run `tegh wrap` again" would only be
+        # refused. The way back to a wrap goes through an unwrap.
+        print(
+            f"\n  !! not wrapped, because it could not be reached: {unreachable}\n"
+            "     It was displaced with the rest, so the gateway does not serve it "
+            "and the harness no\n     longer loads it. To wrap it: run `tegh "
+            f"unwrap --project {_path(project)}`,\n     fix the server, then run "
+            "`tegh wrap` again."
+        )
+    print(
+        f"\nSee what the broker records: tegh audit --verify --project {_path(project)}"
+    )
+    print(f"Restore with: tegh unwrap --project {_path(project)}")
+
+
+def _seed_grants(transaction: WrapTransaction, store: TeghStore, project: Path) -> None:
+    """Issue the floor grants for this project's confirmed action classes.
+
+    The gateway advertises `served_registry()`, which is built from GRANTS —
+    admission alone makes a tool callable, it does not make it served. Before
+    this step a wrapped project got a gateway that advertised nothing and denied
+    everything, which is how interposing the gateway turned out to be more than a config rewrite.
+
+    The base's ceremony does the writing, as ever: `seed` creates each grant with
+    a bootstrap-typed, issuer-signed ledger record beside it, and never
+    overwrites an existing one (so re-wrapping is idempotent rather than a
+    silent re-mint).
+
+    A grant is not a file and nothing takes one back, so this runs after the
+    commit point. It is safe there at every instant: a grant is for one action
+    class under one envelope hash, both read from the manifest on disk, which
+    is already the confirmed one; and a granted tool the manifest does not
+    name yet is still uncallable.
+    """
+    # `ceremony_env` is the ADMISSION ceremony's environment and deliberately
+    # names no manifest — MCP admission does not read one. The grant ceremony
+    # does: it derives the principal, the granted classes and the envelope hash
+    # from the manifest the operator NAMED, and refuses to default it.
+    env = store.ceremony_env(role="maker", project=project)
+    env["BROKER_MANIFEST"] = str(store.manifest_path(project))
+    seed = transaction.run(
+        python_module_argv("safe_agents.broker.grants.commands", "seed"), env
+    )
+    if seed.returncode != 0:
+        raise _ceremony_failed(
+            "issuing grants for this project's admitted tools", seed.stdout + seed.stderr
+        )
+    print(f"  grants issued for the admitted coordinates (store: {store.db_path})")
+
+
+def _admit_committed(
+    transaction: WrapTransaction,
+    prepared: _PreparedWrap,
+    progress: _WrapProgress,
+    args: argparse.Namespace,
+    *,
+    store: TeghStore,
+    project: Path,
+) -> int:
+    """The commit point, and everything after it. Returns the exit status.
+
+    What is left is what cannot be taken back: the grants, and the checker's
+    ratification of each proposal, which writes the row a call is checked
+    against. So nothing here is rolled back, and the ORDER has to make every
+    place this can stop a safe one, including the stops no handler sees
+    (SIGKILL, a power cut). A call executes only when the manifest names the
+    tool, the store's admitted row matches what the server advertises now,
+    and a grant covers it. The order uses the first of those as the switch:
+
+    1. the grants, while the manifest names no tool;
+    2. for each tool, the ratification, and only THEN the manifest rewritten
+       to name that tool as well.
+
+    A stop anywhere leaves each tool either not named, and uncallable, or
+    named with its row at the definition that was reviewed, which is the one
+    the lock already on disk pins and under the classification that was
+    confirmed. Naming a tool before its ratification would be wrong whenever
+    the store still holds an EARLIER admission of it: the server could
+    advertise that earlier definition again and be served under the new
+    classification. Ratifying under the manifest the wrap found would be wrong
+    the other way round.
+
+    A stop signal does not raise here. It is held (`transaction.py`,
+    "Signals") and looked at before each step, so a ceremony is never cut in
+    half, and the report below is printed inside the same hold.
+    """
+    manifest_path = store.manifest_path(project)
+    with signals_held(deliver=False) as arrived:
+        transaction.commit()
+        stopped_by: Optional[BaseException] = None
+        try:
+            print("\n" + "=" * 78)
+            print("ADMITTING (checker ratifies, one tool at a time)")
+            print("=" * 78)
+            _seed_grants(transaction, store, project)
+            for proposal in list(progress.proposed):
+                if arrived:
+                    raise Stopped(arrived[0])
+                error = _ratify(transaction.run, store, project, proposal)
+                if error:
+                    raise _ceremony_failed(
+                        f"the admission ceremony for {proposal.coordinate}", error
+                    )
+                named = [*progress.served, proposal]
+                _write_manifest(
+                    manifest_path,
+                    prepared.manifest_naming(
+                        {(served.server_id, served.tool_name) for served in named}
+                    ),
+                )
+                progress.served.append(proposal)
+                print(f"  admitted  {proposal.coordinate}")
+        except (Exception, KeyboardInterrupt) as exc:  # noqa: BLE001 - reported below
+            stopped_by = exc
+        if stopped_by is None:
+            try:
+                _report_wrapped(prepared, progress, args, store=store, project=project)
+            except OSError:
+                pass  # the wrap is done; only the terminal it was telling has gone
+            return 0
+        try:
+            transaction.stop_children()
+            progress.withdrawn = _withdraw(transaction.run, store, project, progress.waiting)
+        except Exception as failed:  # noqa: BLE001 - tidying; the report still has to be made
+            transaction.steps_failed.append(failed)
+        return _report_part_admitted(
+            transaction, stopped_by, prepared, progress, args, store=store, project=project
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1566,7 +2294,7 @@ def diff_command(args: argparse.Namespace) -> int:
     new_tools = 0
 
     for server in loaded.lock.servers:
-        snapshot, error = _snapshot_server(store, project, server.server_id, env)
+        snapshot, error = _snapshot_server(_run, store, project, server.server_id, env)
         if snapshot is None:
             print(f"!! {server.server_id}: could not be reached — {error}")
             continue

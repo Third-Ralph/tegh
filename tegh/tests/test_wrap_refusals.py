@@ -1,13 +1,22 @@
 """`tegh wrap` when it has to stop: what it says, and what it leaves behind.
 
-Two ways a wrap used to go wrong without saying so, each checked against the
+Three ways a wrap used to go wrong without saying so, each checked against the
 bytes on disk and not against what the command printed:
 
 1. **A second wrap of a wrapped project.** The project's only MCP server is by
    then tegh's own gateway, so the wrap reviewed that, was shown no tools, and
    replaced the signed lock with one pinning none. It now refuses before the
    review and names `tegh unwrap`.
-2. **A harness config tegh cannot read.** Not UTF-8, not readable, or not JSON:
+2. **Input that ends at a question, or Ctrl-C at one.** A credential is moved
+   into tegh's store before the per-tool review, so a wrap whose answers ran
+   out died with the value in the harness config AND the store, and with the
+   project's manifest emptied for the review. It now says so in words and puts
+   the store back. Every one of these cases runs `tegh` as a real subprocess
+   with a real empty pipe, null device, closed descriptor or signal; a patched
+   `input` would prove the seam and not the command. These are two of the ways
+   a wrap stops; `test_wrap_transaction.py` holds every one of them to the
+   same rule, file by file.
+3. **A harness config tegh cannot read.** Not UTF-8, not readable, or not JSON:
    one refusal naming the file, with or without `--accept-gaps`.
 """
 
@@ -16,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -23,16 +33,25 @@ import pytest
 
 pytest.importorskip("mcp", reason="a real wrap snapshots a real MCP server")
 
-from tegh import launch  # noqa: E402
-from tegh.cli import main  # noqa: E402
+from tegh import launch, transaction, unwrap  # noqa: E402
+from tegh.cli import _parse_args, main, wrap_command  # noqa: E402
 from tegh.harnesses import claude_code  # noqa: E402
 from tegh.launch import gateway_argv  # noqa: E402
 from tegh.lockfile import lock_paths  # noqa: E402
+from tegh.tests.wrapping import LEDGER_FIELD as _FIELD  # noqa: E402
+from tegh.tests.wrapping import LEDGER_SECRET as _SECRET  # noqa: E402
 from tegh.tests.wrapping import (  # noqa: E402
+    ADMIT_AS_READ,
     NOT_UTF8_BYTE,
     TOY,
+    TOY_TOOL_COUNT,
+    files_holding,
     fingerprint,
+    give_ledger,
+    interrupt_wrap,
     not_utf8,
+    run_wrap,
+    scripted,
     store_of,
     truncate,
     unreadable,
@@ -346,6 +365,272 @@ def test_a_project_wrapped_by_0_1_1_is_recognised_and_unwrapped(harness, capsys)
     assert unwrap_cli(harness, "--yes") == 0
     assert harness["claude_json"].read_bytes() == before
     assert wrap_admit_all(harness) == 0, capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# Input that ends at a question
+# ---------------------------------------------------------------------------
+
+
+def _wrap_state(harness: dict) -> dict[str, bytes | None]:
+    """What a wrap that stopped at a question must not have changed, as bytes."""
+    store, project = store_of(harness), harness["project"]
+    lock_path, signature_path = lock_paths(project)
+    paths = {
+        "harness config": harness["claude_json"],
+        "credential map": store.secrets_path(project),
+        "manifest": store.manifest_path(project),
+        "snapshot": store.snapshot_path(project, "ledger"),
+        "tegh.lock": lock_path,
+        "tegh.lock.sig": signature_path,
+    }
+    return {
+        name: path.read_bytes() if path.exists() else None for name, path in paths.items()
+    }
+
+
+def _assert_stopped_with_nothing_moved(
+    done, harness: dict, before: dict, *, says: str, status: int = 2, also_in: tuple = ()
+) -> None:
+    assert "Traceback" not in done.stderr, done.stderr
+    assert done.returncode == status, done.stderr
+    stopped = done.stderr.strip()
+    assert stopped.startswith(says), stopped
+    assert len(stopped.splitlines()) == 1, stopped
+    assert _wrap_state(harness) == before
+    assert files_holding(harness["home"].parent, _SECRET) == [harness["claude_json"], *also_in], (
+        "the credential is somewhere it was not before the wrap"
+    )
+    assert "nowhere else" not in stopped
+    assert _SECRET not in done.stdout + done.stderr
+
+
+_ENDED = "REFUSED: input ended before"
+_INTERRUPTED = "INTERRUPTED: tegh wrap was stopped before"
+#: Said only when the credential map had been changed and was put back.
+_MAP_UNDONE = "this wrap had moved into"
+
+
+@pytest.mark.parametrize(
+    ("flags", "stdin", "left_open"),
+    [
+        pytest.param((), {"stdin": subprocess.DEVNULL}, f"is {_FIELD} a CREDENTIAL?", id="null-stdin"),
+        # `--admit-all` leaves the credential question as the only one, and the
+        # end of input used to answer it: the value was moved and the config
+        # rewritten with nobody having decided anything.
+        pytest.param(
+            ("--admit-all",), {"stdin": subprocess.DEVNULL}, f"is {_FIELD} a CREDENTIAL?",
+            id="null-stdin-admit-all",
+        ),
+        pytest.param((), {"closed": True}, f"is {_FIELD} a CREDENTIAL?", id="closed-stdin"),
+        # The credential is answered (Enter relocates it) and then the answers
+        # run out, so the value is already in tegh's store when the wrap stops.
+        pytest.param((), {"input": "\n"}, "[y] admit  [e] edit classification", id="ends-at-a-tool"),
+        pytest.param((), {"input": "\ne\n"}, "effect [write]", id="ends-inside-an-edit"),
+    ],
+)
+def test_input_that_ends_at_a_question_refuses_and_moves_nothing(
+    harness, flags, stdin, left_open
+) -> None:
+    give_ledger(harness, env={_FIELD: _SECRET})
+    assert main(["init"]) == 0
+    before = _wrap_state(harness)
+    assert {before[name] for name in ("credential map", "manifest", "tegh.lock")} == {None}
+
+    done = run_wrap(harness, *flags, **stdin)
+
+    _assert_stopped_with_nothing_moved(done, harness, before, says=_ENDED)
+    assert left_open in done.stderr
+    assert (_MAP_UNDONE in done.stderr) == ("input" in stdin)
+    if "input" in stdin:
+        assert "did not exist before this wrap and was removed again" in done.stderr
+        assert not store_of(harness).snapshot_path(harness["project"], "ledger").parent.exists()
+
+
+def test_a_wrap_that_moved_no_credential_does_not_say_it_undid_one(harness) -> None:
+    """The empty credential map a wrap creates for its snapshot is not a moved value.
+
+    Most projects hold no literal credential, so this is the refusal most people
+    would read.
+    """
+    assert main(["init"]) == 0
+    before = _wrap_state(harness)
+    assert before["credential map"] is None
+
+    done = run_wrap(harness, stdin=subprocess.DEVNULL)
+
+    assert done.returncode == 2, done.stderr
+    assert done.stderr.strip().startswith(_ENDED), done.stderr
+    assert "[y] admit  [e] edit classification" in done.stderr
+    assert _wrap_state(harness) == before
+    assert _MAP_UNDONE not in done.stderr
+
+
+def _a_leaf_of_another_server(wrapped: dict) -> tuple:
+    """A leaf this wrap does not own, in a layout tegh would not write."""
+    secrets_path = wrapped["store"].secrets_path(wrapped["project"])
+    secrets_path.write_bytes(b'{"another-server":"{\\"TOKEN\\": \\"kept\\"}"}\n')
+    return ()
+
+
+def _the_value_already_there(wrapped: dict) -> tuple:
+    """This server's leaf, already holding the value, as tegh itself writes it.
+
+    An earlier wrap that stopped after relocating leaves exactly this, with the
+    literal still in the harness config. Putting the map back is then putting a
+    copy of the credential back, and the refusal must not say otherwise.
+    """
+    wrapped["store"].write_secret_leaf(wrapped["project"], "ledger", {_FIELD: _SECRET})
+    return (wrapped["store"].secrets_path(wrapped["project"]),)
+
+
+@pytest.mark.parametrize(
+    ("leave", "undone"),
+    [
+        pytest.param(_a_leaf_of_another_server, True, id="another-servers-leaf"),
+        pytest.param(_the_value_already_there, False, id="the-value-already-there"),
+    ],
+)
+def test_a_refused_wrap_puts_back_the_store_it_found(wrapped, leave, undone: bool) -> None:
+    """A project wrapped before: a signed lock, a manifest and a credential map exist.
+
+    "As it was" is a statement about bytes and not about a parsed map, and
+    about every file, including one that already held the credential.
+    """
+    assert unwrap_cli(wrapped, "--yes") == 0
+    also_in = leave(wrapped)
+    before = _wrap_state(wrapped)
+    assert None not in before.values()
+
+    done = run_wrap(wrapped, input="\n")
+
+    _assert_stopped_with_nothing_moved(done, wrapped, before, says=_ENDED, also_in=also_in)
+    assert (_MAP_UNDONE in done.stderr) == undone
+    if undone:
+        assert "put back, byte for byte" in done.stderr
+
+
+def _at_the_credential_question(stdout: str) -> bool:
+    return f"is {_FIELD} a CREDENTIAL?" in stdout
+
+
+def _at_a_tool_question(stdout: str) -> bool:
+    return "[y] admit  [e] edit classification" in stdout
+
+
+@pytest.mark.parametrize(
+    ("typed", "when", "moved"),
+    [
+        pytest.param("", _at_the_credential_question, False, id="at-the-credential-question"),
+        # Enter relocates the credential, so it is in tegh's store when Ctrl-C lands.
+        pytest.param("\n", _at_a_tool_question, True, id="at-a-tool-question"),
+    ],
+)
+def test_ctrl_c_at_a_question_stops_in_words_and_moves_nothing(
+    harness, typed: str, when, moved: bool
+) -> None:
+    give_ledger(harness, env={_FIELD: _SECRET})
+    assert main(["init"]) == 0
+    before = _wrap_state(harness)
+
+    done = interrupt_wrap(harness, typed=typed, when=when)
+
+    _assert_stopped_with_nothing_moved(
+        done, harness, before, says=_INTERRUPTED, status=unwrap.EXIT_INTERRUPTED
+    )
+    assert (_MAP_UNDONE in done.stderr) == moved
+
+
+def test_ctrl_c_while_a_server_is_being_asked_for_its_tools_moves_nothing(harness) -> None:
+    """Between two questions the wrap is waiting on a server, not on a person.
+
+    The server here never answers, so the wrap is still inside the snapshot,
+    with the credential relocated and the manifest written, when the signal
+    lands. It reads its stdin, so it ends when the wrap lets go of it.
+    """
+    give_ledger(
+        harness, command=sys.executable, args=["-c", "import sys; sys.stdin.read()"],
+        env={_FIELD: _SECRET},
+    )
+    assert main(["init"]) == 0
+    before = _wrap_state(harness)
+    manifest = store_of(harness).manifest_path(harness["project"])
+
+    done = interrupt_wrap(harness, typed="\n", when=lambda _stdout: manifest.exists())
+
+    _assert_stopped_with_nothing_moved(
+        done, harness, before, says=_INTERRUPTED, status=unwrap.EXIT_INTERRUPTED
+    )
+    assert _MAP_UNDONE in done.stderr
+    assert "REVIEW" not in done.stdout, "the wrap had left the snapshot before the signal"
+
+
+_ADMITTED = "ledger__get_entry"
+_ENTRY = '{"entry_id": "L-001"}'
+
+
+def _call(harness: dict) -> int:
+    return main(["call", _ADMITTED, "--args", _ENTRY, "--project", str(harness["project"])])
+
+
+def test_a_refused_wrap_leaves_a_working_project_working(harness, capsys) -> None:
+    """Admitted with `--no-rewrite`, so a second wrap is not an already-wrapped one.
+
+    The review works from a manifest whose tool namespace is empty. Left behind
+    by a wrap that then refused, that manifest is the one the gateway serves
+    from, and the call below was answered `no manifest entry`.
+    """
+    assert main(["init"]) == 0
+    wrapped = wrap_command(
+        _parse_args(wrap_argv(harness, "--no-rewrite")),
+        prompt=scripted(list(ADMIT_AS_READ) * TOY_TOOL_COUNT),
+    )
+    assert wrapped == 0
+    assert _call(harness) == 0
+    assert "opening balance" in capsys.readouterr().out
+    before = _wrap_state(harness)
+    assert before["manifest"] is not None and before["snapshot"] is not None
+
+    done = run_wrap(harness, stdin=subprocess.DEVNULL)
+
+    assert done.returncode == 2 and done.stderr.strip().startswith(_ENDED), done.stderr
+    assert "[y] admit" in done.stderr, "the wrap stopped before the review, which proves less"
+    assert _wrap_state(harness) == before
+    assert _call(harness) == 0, capsys.readouterr().err
+    assert "opening balance" in capsys.readouterr().out
+
+
+def test_a_store_that_cannot_be_put_back_is_said_and_named(harness, capsys, monkeypatch) -> None:
+    give_ledger(harness, env={_FIELD: _SECRET})
+    assert main(["init"]) == 0
+    store = store_of(harness)
+    secrets_path = store.secrets_path(harness["project"])
+    # A map that was there before, so putting it back is a write and not a removal.
+    store.write_secret_leaf(harness["project"], "another-server", {"TOKEN": "kept"})
+    replace = transaction._replace
+
+    def _denied(path, content, mode) -> None:
+        if path == secrets_path:
+            raise PermissionError(13, "Permission denied", str(path))
+        replace(path, content, mode)
+
+    def _ends_at_the_first_tool(question: str) -> str:
+        if "CREDENTIAL?" in question:
+            return ""
+        raise EOFError
+
+    monkeypatch.setattr(transaction, "_replace", _denied)
+    rc = wrap_command(_parse_args(wrap_argv(harness)), prompt=_ends_at_the_first_tool)
+    failure = capsys.readouterr().err.strip()
+
+    assert rc == 1
+    assert failure.startswith("FAILED: input ended before"), failure
+    assert f"{secrets_path} (Permission denied)" in failure
+    assert f"{secrets_path} may still hold a copy" in failure
+    assert len(failure.splitlines()) == 1, failure
+    assert _SECRET not in failure
+    # The files that could be put back were, whatever happened to the first.
+    assert not store.manifest_path(harness["project"]).exists()
 
 
 # ---------------------------------------------------------------------------
