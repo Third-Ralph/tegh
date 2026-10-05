@@ -42,6 +42,56 @@ from typing import Mapping, Optional, Sequence
 #: carry it, so a Windows `tegh call` would start its child without `SYSTEMROOT`.
 HARNESS_SPAWN_ENV_VARS: tuple[str, ...] = ("HOME", "LOGNAME", "PATH", "SHELL", "TERM", "USER")
 
+#: The variables the broker's own processes inherit from whatever started tegh:
+#: the gateway, and each ceremony command `tegh` runs. `TeghStore.gateway_env` and
+#: `TeghStore.ceremony_env` (`store.py`) start from these names and add the values
+#: tegh sets, so configuration tegh did not choose cannot arrive from a shell (#5).
+#:
+#: One list, extended, and not a second one: the first six names ARE
+#: `HARNESS_SPAWN_ENV_VARS`. They are what the broker's MCP client reads out of
+#: its own environment to build a wrapped stdio server's, so dropping `PATH` here
+#: is a server whose `npx` cannot be found, and `LOGNAME`/`USER` are where a
+#: ceremony record's operator name comes from.
+#:
+#: The rest is why the two lists differ. `harness_spawn_env` models what a harness
+#: hands over, to reproduce its spawn. This one decides what a process tegh starts
+#: itself may keep, and that process also runs from an operator's terminal, where
+#: three more kinds of variable are the machine's and not the broker's
+#: configuration:
+#:
+#: - locale, which decides how the child decodes text;
+#: - the temporary directory;
+#: - proxy and certificate settings, without which snapshotting or calling a
+#:   REMOTE server fails behind a corporate proxy. Both spellings of the proxy
+#:   names, because the HTTP client reads either. These carry authority and are
+#:   passed knowing it: the shell's proxy is where the broker's requests to a
+#:   remote server go, credential headers included, and the shell's trust store
+#:   is whose certificates it accepts.
+#:
+#: Everything else is dropped, on purpose. No `BROKER_*`, signing or AWS name is
+#: here, and none may be added: a value the broker should run under is set by
+#: tegh, by name. `PYTHONPATH` and the other `PYTHON*` names are dropped with the
+#: rest, so a shell's value for one does not reach the child; the child is this
+#: interpreter, which finds the base without them. The dynamic loader's names
+#: (`LD_LIBRARY_PATH`, `DYLD_LIBRARY_PATH`) are dropped the same way.
+BROKER_INHERITED_ENV_VARS: tuple[str, ...] = (
+    *HARNESS_SPAWN_ENV_VARS,
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TMPDIR",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+)
+
 #: How long `tegh call` waits for each reply from the gateway before giving up.
 #: Generous on purpose: the first call starts the connector behind the tool, and a
 #: cold `npx` connector downloads its package before it can answer.
@@ -99,6 +149,24 @@ def gateway_argv(
     ]
 
 
+def inherited_env(
+    names: Sequence[str], environ: Optional[Mapping[str, str]] = None
+) -> dict[str, str]:
+    """The named variables as `environ` holds them, and nothing else.
+
+    The one way tegh starts a child's environment: from a list of names, never
+    from a copy of the parent. A name `environ` does not hold is left out and not
+    invented. A value beginning `()` is an exported shell function and is
+    skipped, as the SDK skips it.
+    """
+    source = os.environ if environ is None else environ
+    return {
+        name: source[name]
+        for name in names
+        if name in source and not source[name].startswith("()")
+    }
+
+
 def harness_spawn_env(environ: Optional[Mapping[str, str]] = None) -> dict[str, str]:
     """The environment a harness gives a spawned stdio child, built from `environ`.
 
@@ -111,13 +179,5 @@ def harness_spawn_env(environ: Optional[Mapping[str, str]] = None) -> dict[str, 
     failed for the first operator whose harness passed nothing. A caller that
     spawns the gateway with this environment fails where the harness's spawn
     would fail, which is the only reason to spawn it by hand at all.
-
-    A value beginning `()` is an exported shell function and is skipped, as the
-    SDK skips it.
     """
-    source = os.environ if environ is None else environ
-    return {
-        name: source[name]
-        for name in HARNESS_SPAWN_ENV_VARS
-        if name in source and not source[name].startswith("()")
-    }
+    return inherited_env(HARNESS_SPAWN_ENV_VARS, environ)
