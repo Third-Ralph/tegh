@@ -190,11 +190,14 @@ def unwrap_cli(state: dict, *flags: str, prompt=None) -> int:
     )
 
 
-def site_files(tmp_path: Path, *, local, project_scope, user) -> tuple[Path, Path, Path]:
+def site_files(
+    tmp_path: Path, *, local, project_scope, user, harness_config: bool = True
+) -> tuple[Path, Path, Path]:
     """A harness home and project holding the given `mcpServers` blocks.
 
     `None` means the scope has no block at all, which is the usual state of two
-    of the three.
+    of the three. `harness_config=False` leaves `.claude.json` out altogether:
+    the home of a harness that has never written its config.
     """
     project = tmp_path / "widget"
     project.mkdir()
@@ -204,7 +207,10 @@ def site_files(tmp_path: Path, *, local, project_scope, user) -> tuple[Path, Pat
     if user is not None:
         document["mcpServers"] = user
     claude_json = tmp_path / ".claude.json"
-    claude_json.write_text(json.dumps(document, indent=2, ensure_ascii=False), encoding="utf-8")
+    if harness_config:
+        claude_json.write_text(
+            json.dumps(document, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
     project_mcp = project / ".mcp.json"
     if project_scope is not None:
         project_mcp.write_text(
@@ -222,6 +228,7 @@ def interposed(
     project_scope=None,
     user=None,
     config_mode: int | None = None,
+    harness_config: bool = True,
 ) -> dict:
     """The state a wrap leaves behind, reached without the admission ceremony.
 
@@ -238,7 +245,8 @@ def interposed(
     (`None` for a file that did not exist) and the relocated values.
     """
     project, claude_json, project_mcp = site_files(
-        tmp_path, local=local, project_scope=project_scope, user=user
+        tmp_path, local=local, project_scope=project_scope, user=user,
+        harness_config=harness_config,
     )
     if config_mode is not None:
         for config in (claude_json, project_mcp):

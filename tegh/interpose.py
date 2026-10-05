@@ -310,6 +310,12 @@ class SiteBackup:
     pointer: list[str]
     block: dict[str, Any]
     block_existed: bool
+    #: Whether the FILE was there before the wrap. A wrap creates the file its
+    #: gateway entry goes into when there is none, and an unwrap removes a file
+    #: the wrap created once nothing else is in it (`SiteRestore.removes_file`).
+    #: A backup written before this was recorded is read as True, which leaves
+    #: the file where it is.
+    file_existed: bool = True
 
 
 @dataclass(frozen=True)
@@ -347,6 +353,7 @@ class WrapBackup:
                         "pointer": s.pointer,
                         "block": s.block,
                         "block_existed": s.block_existed,
+                        "file_existed": s.file_existed,
                     }
                     for s in self.sites
                 ],
@@ -382,6 +389,7 @@ class WrapBackup:
                         pointer=[str(key) for key in s["pointer"]],
                         block=dict(s["block"]),
                         block_existed=bool(s["block_existed"]),
+                        file_existed=bool(s.get("file_existed", True)),
                     )
                     for s in data["sites"]
                 ],
@@ -480,6 +488,15 @@ def _write_block(site: ConfigSite, block: dict[str, Any], *, prune_empty: bool) 
             return
         document = {}
 
+    _set_block(document, site, block, prune_empty=prune_empty)
+    site.path.parent.mkdir(parents=True, exist_ok=True)
+    _replace_file(site.path, _render(document))
+
+
+def _set_block(
+    document: Any, site: ConfigSite, block: dict[str, Any], *, prune_empty: bool
+) -> None:
+    """Put `block` at the site's pointer in a parsed document, in memory."""
     node: Any = document
     for key in site.pointer[:-1]:
         if not isinstance(node, dict):
@@ -494,8 +511,27 @@ def _write_block(site: ConfigSite, block: dict[str, Any], *, prune_empty: bool) 
     else:
         node[leaf] = block
 
-    site.path.parent.mkdir(parents=True, exist_ok=True)
-    _replace_file(site.path, _render(document))
+
+def _prune_empty_parents(document: Any, pointer: Sequence[str]) -> bool:
+    """Drop the objects above a block that are empty. Returns whether any went.
+
+    Only for a file the wrap created: there, every object on the way down to
+    the gateway entry was made by the wrap, so one that is empty again holds
+    nothing of anybody's. Stops at the first object that holds something.
+    """
+    chain: list[Any] = [document]
+    for key in pointer[:-1]:
+        node = chain[-1]
+        if not isinstance(node, dict) or key not in node:
+            break
+        chain.append(node[key])
+    pruned = False
+    for depth in range(len(chain) - 1, 0, -1):
+        if chain[depth] != {}:
+            break
+        del chain[depth - 1][pointer[depth - 1]]
+        pruned = True
+    return pruned
 
 
 #: The mode of a config tegh has to CREATE. A file it replaces keeps its own.
@@ -689,7 +725,7 @@ def apply_interposition(
     moved = dict(relocated or {})
     originals: list[SiteBackup] = []
     for site in plan.sites:
-        _, block, existed = _load_site(site)
+        document, block, existed = _load_site(site)
         originals.append(
             SiteBackup(
                 scope=site.scope.value,
@@ -699,6 +735,7 @@ def apply_interposition(
                 if moved
                 else block,
                 block_existed=existed,
+                file_existed=document is not None,
             )
         )
 
@@ -807,6 +844,18 @@ class SiteRestore:
     gateway_name: Optional[str] = None
     #: Credential coordinates the site already held when the store did not.
     in_place: tuple[Coordinate, ...] = ()
+    #: The wrap CREATED this site's file: it was not there before, and the
+    #: gateway entry went into it. Never true for a file the wrap only read.
+    file_created: bool = False
+    #: The unwrap removes the file: the wrap created it, and with the wrap's
+    #: own entries taken out nothing is left in it. One server or one other
+    #: key added since is enough to keep the file, holding just that. The same
+    #: on every site of one file.
+    removes_file: bool = False
+    #: The unwrap takes out the objects the wrap made above this site's block,
+    #: which are on the disk and empty once the block is out, in a file the
+    #: wrap created and the unwrap keeps. Never true beside `removes_file`.
+    prunes_parents: bool = False
 
     @property
     def servers(self) -> list[str]:
@@ -823,6 +872,8 @@ def _merged(
     existed: bool,
     gateway_name: Optional[str],
     in_place: Sequence[Coordinate] = (),
+    *,
+    file_created: bool = False,
 ) -> SiteRestore:
     """Merge the pre-wrap block with what the site holds NOW. Reads, never writes.
 
@@ -862,9 +913,84 @@ def _merged(
         target=target,
         gateway_name=gateway_name,
         in_place=tuple(in_place),
+        file_created=file_created,
     )
     holds = exists_now == step.target_exists and current == target
     return replace(step, changes=not holds)
+
+
+def _created_files(steps: Sequence[SiteRestore]) -> list[list[SiteRestore]]:
+    """The steps of each file the wrap created, grouped by file."""
+    by_path: dict[Path, list[SiteRestore]] = {}
+    for step in steps:
+        if step.file_created:
+            by_path.setdefault(step.site.path, []).append(step)
+    return list(by_path.values())
+
+
+def _reaches(document: Any, keys: Sequence[str]) -> bool:
+    """Whether every object on the way down `keys` is in the document."""
+    node = document
+    for key in keys:
+        if not isinstance(node, dict) or key not in node:
+            return False
+        node = node[key]
+    return True
+
+
+def _with_file_fate(steps: Sequence[SiteRestore]) -> list[SiteRestore]:
+    """Mark what the unwrap does to a file the wrap created. Reads, never writes.
+
+    The answer comes from the file as it is now, with every site's target put
+    into a copy in memory: what would be left is what decides, so a server kept
+    at either scope of the file, or any key something else has written beside
+    them, keeps the file. A file that stays loses the objects the wrap made
+    above its entry when they are on the disk and end up empty, and the site
+    they are above is marked, so the plan has a line for every write.
+    """
+    #: Per step: (removes_file, prunes_parents).
+    fate: dict[int, tuple[bool, bool]] = {}
+    for group in _created_files(steps):
+        document, _, _ = _load_site(group[0].site)
+        if document is None:
+            continue  # already gone: the state a re-run finds
+        parents = [step.site.pointer[:-1] for step in group]
+        there = [_reaches(document, keys) for keys in parents]
+        for step in group:
+            _set_block(document, step.site, step.target, prune_empty=not step.target_exists)
+            _prune_empty_parents(document, step.site.pointer)
+        for step, keys, was_there in zip(group, parents, there):
+            fate[id(step)] = (
+                (True, False)
+                if document == {}
+                else (False, was_there and not _reaches(document, keys))
+            )
+    marked: list[SiteRestore] = []
+    for step in steps:
+        removes_file, prunes_parents = fate.get(id(step), (False, False))
+        marked.append(replace(step, removes_file=removes_file, prunes_parents=prunes_parents))
+    return marked
+
+
+def _settle_created_file(group: Sequence[SiteRestore]) -> None:
+    """Do what the plan said about a file the wrap created, once its sites are written.
+
+    Nothing, when the plan has no line for it. Otherwise the objects the wrap
+    made on the way down to its entry go when they are empty again. The file is
+    removed only if that empties it AND the plan said it would be removed;
+    whatever else is left is written back. Read again here because the sites
+    were just written, and because something written into the file since the
+    recheck is not this function's to remove.
+    """
+    site = group[0].site
+    if not any(step.removes_file or step.prunes_parents for step in group):
+        return
+    document, _, _ = _load_site(site)
+    pruned = [_prune_empty_parents(document, step.site.pointer) for step in group]
+    if document == {} and group[0].removes_file:
+        site.path.unlink()
+    elif any(pruned):
+        _replace_file(site.path, _render(document))
 
 
 def plan_restore(
@@ -883,6 +1009,12 @@ def plan_restore(
     look in the site instead (`_resolve_block`). A reference found in neither
     place raises `CredentialUnavailable`.
     """
+    # A wrap creates one file at most: the one its gateway entry went into.
+    created = {
+        s.path
+        for s in backup.sites
+        if not s.file_existed and f"{s.scope}:{s.path}" == backup.gateway_site
+    }
     prepared: list[SiteRestore] = []
     for site_backup in backup.sites:
         site = ConfigSite(
@@ -903,9 +1035,10 @@ def plan_restore(
                 site_backup.block_existed,
                 _gateway_name_at(backup, site),
                 in_place,
+                file_created=site_backup.path in created,
             )
         )
-    return prepared
+    return _with_file_fate(prepared)
 
 
 def recheck_restore(steps: Sequence[SiteRestore]) -> list[SiteRestore]:
@@ -915,13 +1048,51 @@ def recheck_restore(steps: Sequence[SiteRestore]) -> list[SiteRestore]:
     its config while the question waits. The merge is therefore redone here,
     so what is written keeps what is there NOW. If the entries kept differ from
     the ones the plan named, the person agreed to something else: this raises
-    `ConfigChangedSincePlan` before any site is written.
+    `ConfigChangedSincePlan` before any site is written. The same goes for a
+    file the wrap created, when what the plan showed happening to it is no
+    longer what would happen.
     """
-    fresh = [
-        _merged(step.site, step.block, step.block_existed, step.gateway_name, step.in_place)
-        for step in steps
-    ]
+    fresh = _with_file_fate(
+        [
+            _merged(
+                step.site, step.block, step.block_existed, step.gateway_name,
+                step.in_place, file_created=step.file_created,
+            )
+            for step in steps
+        ]
+    )
     for planned, now in zip(steps, fresh):
+        # A file the plan showed removed and that is gone already is where the
+        # person agreed it would be: there is nothing to stop for.
+        gone = planned.removes_file and not planned.site.path.exists()
+        was = is_now = None
+        if planned.removes_file != now.removes_file and not gone:
+            was, is_now = (
+                ("removing this file, which the wrap created", "holds something else")
+                if planned.removes_file
+                else ("keeping this file", "holds nothing but what the wrap put there")
+            )
+        elif planned.prunes_parents != now.prunes_parents:
+            was, is_now = (
+                (
+                    "removing an empty entry the wrap created in this file",
+                    "holds something in that entry, or no such entry",
+                )
+                if planned.prunes_parents
+                else (
+                    "leaving the rest of this file as it is",
+                    "holds an empty entry the wrap created",
+                )
+            )
+        if was is not None:
+            # Raised before the kept-entry check below, which the same change
+            # can also trip: this one is about a whole file.
+            raise ConfigChangedSincePlan(
+                f"{planned.site.path} changed while tegh unwrap was waiting: "
+                f"the plan showed tegh {was}, and it now {is_now}. Nothing was "
+                "changed. Run `tegh unwrap` again for a plan of what is there "
+                "now."
+            )
         if set(planned.kept) != set(now.kept):
             raise ConfigChangedSincePlan(
                 f"{planned.site.label} changed while tegh unwrap was waiting: "
@@ -949,7 +1120,13 @@ def write_site(step: SiteRestore) -> None:
 
 
 def site_restored(step: SiteRestore) -> bool:
-    """Whether the site holds this step's target block, read off the disk."""
+    """Whether the site holds this step's target block, read off the disk.
+
+    A site whose file the unwrap removes is not restored while the file is
+    still there, whatever it holds.
+    """
+    if step.removes_file and step.site.path.exists():
+        return False
     _, current, exists_now = _load_site(step.site)
     return exists_now == step.target_exists and current == step.target
 
@@ -966,6 +1143,8 @@ def apply_restore(steps: Sequence[SiteRestore]) -> None:
     for step in fresh:
         if step.changes:
             write_site(step)
+    for group in _created_files(fresh):
+        _settle_created_file(group)
     for step in fresh:
         if not site_restored(step):
             raise RestoreUnverified(
