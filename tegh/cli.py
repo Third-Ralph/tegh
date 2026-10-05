@@ -68,7 +68,12 @@ from tegh.discovery import (
 from tegh import interpose
 from tegh import unwrap
 from tegh.harnesses import claude_code
-from tegh.launch import DEFAULT_CALL_TIMEOUT_SECONDS, tegh_launcher
+from tegh.launch import (
+    BROKER_INHERITED_ENV_VARS,
+    DEFAULT_CALL_TIMEOUT_SECONDS,
+    inherited_env,
+    tegh_launcher,
+)
 from tegh.lock import (
     LOCK_FORMAT_VERSION,
     AttestationKind,
@@ -1345,8 +1350,11 @@ def audit_command(args: argparse.Namespace) -> int:
         argv.append("--json")
     # No broker environment: the tape reader opens no store, manifest or
     # connector. Looking at what was recorded must not be able to change it.
+    # What it does get is the machine's settings by name, as every other child
+    # does, and nothing else from the shell: it reads the one file it is given
+    # and no variable.
     return subprocess.run(  # noqa: S603 — fixed argv, no shell
-        [sys.executable, *argv], check=False
+        [sys.executable, *argv], env=inherited_env(BROKER_INHERITED_ENV_VARS), check=False
     ).returncode
 
 

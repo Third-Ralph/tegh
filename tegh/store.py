@@ -63,6 +63,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Collection, Mapping
 
+from tegh.launch import BROKER_INHERITED_ENV_VARS, inherited_env
+
 #: Override for the tegh home. Named rather than defaulted-and-hidden so a
 #: second, isolated tegh (a test, a second identity) is one env var away.
 TEGH_HOME_ENV = "TEGH_HOME"
@@ -385,8 +387,16 @@ class TeghStore:
         `BROKER_ENVELOPE_LOAD` is deliberately absent: the MCP admission
         ceremony does not read an envelope, and naming one here would be config
         with no consumer.
+
+        Nothing else the base reads arrives either. The environment starts from
+        `BROKER_INHERITED_ENV_VARS` (`launch.py`) and not from a copy of this
+        process's, so a variable the invoking shell exports reaches the ceremony
+        only if it is on that list or set below (#5). That is what keeps a stale
+        `ISSUER_SIGNING_KEY_SECRET_ARN` out: it would collide with the file arm,
+        and the base refuses when both are set — correctly, since picking one
+        silently would attribute records to a key the operator did not mean.
         """
-        environment = dict(os.environ)
+        environment = inherited_env(BROKER_INHERITED_ENV_VARS)
         environment.update(
             {
                 "BROKER_STORE": "sqlite",
@@ -406,10 +416,6 @@ class TeghStore:
                 "BROKER_SECRETS_FILE": str(self.ensure_secrets_file(project)),
             }
         )
-        # A stale AWS-arm signing source would collide with the file arm and
-        # the base refuses when both are set — correctly, since picking one
-        # silently would attribute records to a key the operator did not mean.
-        environment.pop("ISSUER_SIGNING_KEY_SECRET_ARN", None)
         return environment
 
     def gateway_env(self, *, project: Path | str) -> dict[str, str]:
@@ -428,8 +434,19 @@ class TeghStore:
         is not a choice either: the base REFUSES `seed` on sqlite, so the gateway
         serves what the ceremony wrote and nothing else — absent grants are
         denied, fail-closed.
+
+        The values below are the WHOLE of the broker's configuration. The
+        environment starts from `BROKER_INHERITED_ENV_VARS` (`launch.py`) and not
+        from a copy of this process's, so a `BROKER_*` variable exported in the
+        shell that ran `tegh gateway` does not reach the broker (#5). The case
+        that showed it was `BROKER_SQLITE_GRANTS_PATH`, which the base reads at
+        boot and tegh never names: inherited, it pointed the gateway at a grants
+        database the wrap had not written, and every admitted call was refused
+        as not granted. `BROKER_AUDIT_BUCKET`, `BROKER_ENVELOPE_LOAD` and
+        `BROKER_LOCAL_IDENTITY` stay out the same way; each selects an arm this
+        gateway does not run.
         """
-        environment = dict(os.environ)
+        environment = inherited_env(BROKER_INHERITED_ENV_VARS)
         environment.update(
             {
                 "BROKER_STORE": "sqlite",
@@ -448,8 +465,6 @@ class TeghStore:
         # holds the credentials `tegh wrap` relocated out of the harness config,
         # keyed by bare leaf; it stays an empty 0600 map for a project with no
         # credentialed server, so the arm it names always resolves.
-        for stale in ("BROKER_AUDIT_BUCKET", "BROKER_ENVELOPE_LOAD", "BROKER_LOCAL_IDENTITY"):
-            environment.pop(stale, None)
         return environment
 
 

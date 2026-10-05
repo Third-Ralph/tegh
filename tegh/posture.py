@@ -70,6 +70,7 @@ from typing import Callable, Literal, Optional
 
 import yaml
 
+from tegh.launch import inherited_env
 from tegh.lock import Harness
 from tegh.lockfile import LoadedLock, LockSignatureInvalid, lock_paths
 from tegh.signing import UnknownLockSigner
@@ -565,6 +566,16 @@ _REGISTRY_RULE_PREFIX = "MCP_"
 _ISSUER_VERIFY_KEYS_FILE_ENV = "ISSUER_VERIFY_KEYS_FILE"
 _EVALUATOR_VERIFY_KEYS_FILE_ENV = "EVALUATOR_VERIFY_KEYS_FILE"
 
+#: The two names the audit, and only the audit, takes from the calling
+#: environment. `ceremony_env` inherits a short list of machine settings and no
+#: signing or verification name (#5), so without this the skipped-rules line
+#: below would point the reader at a variable that could never arrive. They are
+#: carried for this one read-only command and for no ceremony leg. They are not
+#: inert there: the file decides which signatures the audit counts as valid, so
+#: a signature rule that runs because a shell named one rests on a key file the
+#: shell chose, and not on one tegh named.
+_AUDIT_VERIFY_KEYS_ENV = (_ISSUER_VERIFY_KEYS_FILE_ENV, _EVALUATOR_VERIFY_KEYS_FILE_ENV)
+
 
 def _audit_lines(store: TeghStore, *, runner=None) -> list[PostureLine]:
     """Run the base's store audit against this tegh home's database.
@@ -595,6 +606,7 @@ def _audit_lines(store: TeghStore, *, runner=None) -> list[PostureLine]:
     # inert for a read-only command; the audit writes nothing.
     try:
         env = store.ceremony_env(role="checker", project=".")
+        env.update(inherited_env(_AUDIT_VERIFY_KEYS_ENV))
     except TeghStoreError as exc:
         return [
             PostureLine(

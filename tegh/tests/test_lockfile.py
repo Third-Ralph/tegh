@@ -22,6 +22,7 @@ from typing import Any
 import pytest
 
 from safe_agents.broker.schemas import McpToolDef, ToolOp, compute_tool_def_hash
+from tegh.launch import BROKER_INHERITED_ENV_VARS
 from tegh.lock import (
     LOCK_FORMAT_VERSION,
     AttestationKind,
@@ -308,15 +309,106 @@ class TestCeremonyEnvironment:
         checker = store.ceremony_env(role="checker", project=tmp_path)
         assert maker["BROKER_LOCAL_IDENTITY"] != checker["BROKER_LOCAL_IDENTITY"]
 
-    def test_an_ambient_aws_signing_source_is_cleared(
-        self, tmp_path: Path, monkeypatch: Any
+
+#: The two environments tegh builds for the base's processes.
+_BROKER_ENVIRONMENTS = {
+    "ceremony": lambda store, project: store.ceremony_env(role="maker", project=project),
+    "gateway": lambda store, project: store.gateway_env(project=project),
+}
+
+#: What a shell can export that neither environment names. The base reads every
+#: `BROKER_*` and signing name here; the last three are not the base's, and are
+#: here because an inherit-everything start passed them too.
+_ONLY_THE_SHELL_NAMES = (
+    "BROKER_SQLITE_GRANTS_PATH",  # the case in #5: a second grants database
+    "BROKER_SQLITE_GRANTS_READONLY",
+    "BROKER_CEREMONY_IDENTITY",  # would select a different identity arm
+    "BROKER_AUDIT_BUCKET",
+    "BROKER_ENVELOPE_LOAD",
+    # The base refuses when both key sources are set — correctly, since picking
+    # one silently would attribute records to an unintended key.
+    "ISSUER_SIGNING_KEY_SECRET_ARN",
+    "ISSUER_VERIFY_KEYS_FILE",
+    "AWS_PROFILE",
+    "PYTHONPATH",
+    "TEGH_HOME",
+)
+
+#: Every name both environments take from the shell: a copy of
+#: `BROKER_INHERITED_ENV_VARS` by value, on purpose. A name deleted from the list
+#: fails its own case below in both environments, and a name added to it fails
+#: the comparison until it is added here too, which is the deliberate edit.
+_INHERITED_FROM_THE_SHELL = (
+    "HOME", "LOGNAME", "PATH", "SHELL", "TERM", "USER",
+    "LANG", "LC_ALL", "LC_CTYPE",
+    "TMPDIR",
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+    "SSL_CERT_FILE", "SSL_CERT_DIR",
+)
+
+_FROM_THE_SHELL = "from-the-shell"
+_AS_THE_MACHINE_HAS_IT = "/as/the/machine/has/it"
+
+
+@pytest.fixture(params=sorted(_BROKER_ENVIRONMENTS))
+def broker_environment(request: Any, tmp_path: Path):
+    """Build one of the two environments, from whatever `os.environ` holds then."""
+    store = provision(tmp_path / "home")
+    return lambda: _BROKER_ENVIRONMENTS[request.param](store, tmp_path / "proj")
+
+
+class TestNothingArrivesFromTheShell:
+    """Both environments start from a list of names, never from `os.environ` (#5)."""
+
+    @pytest.mark.parametrize("name", _ONLY_THE_SHELL_NAMES)
+    def test_a_variable_tegh_does_not_name_is_dropped(
+        self, broker_environment: Any, monkeypatch: Any, name: str
     ) -> None:
-        """The base refuses when both key sources are set — correctly, since
-        picking one silently would attribute records to an unintended key."""
-        monkeypatch.setenv("ISSUER_SIGNING_KEY_SECRET_ARN", "arn:aws:secretsmanager:...")
-        store = provision(tmp_path / "home")
-        env = store.ceremony_env(role="maker", project=tmp_path)
-        assert "ISSUER_SIGNING_KEY_SECRET_ARN" not in env
+        monkeypatch.setenv(name, _FROM_THE_SHELL)
+        assert name not in broker_environment()
+
+    def test_a_variable_tegh_sets_keeps_the_value_tegh_set(
+        self, broker_environment: Any, monkeypatch: Any
+    ) -> None:
+        """The other half of "named, not inherited": for a name tegh does set,
+        the shell's value loses. Every name is poisoned at once, so a name added
+        to either environment later is covered without being listed here."""
+        for name in BROKER_INHERITED_ENV_VARS:
+            monkeypatch.delenv(name, raising=False)
+        named = broker_environment()
+        assert named, "with nothing to inherit, what is left is what tegh sets"
+        for name in named:
+            monkeypatch.setenv(name, _FROM_THE_SHELL)
+
+        assert broker_environment() == named
+
+    def test_no_base_configuration_is_on_the_inherited_list(self) -> None:
+        """The list is machine settings. A `BROKER_*` or signing name on it would
+        hand that value back to the shell, which is the defect, one line long."""
+        assert not [
+            name
+            for name in BROKER_INHERITED_ENV_VARS
+            if name.startswith(("BROKER_", "ISSUER_", "EVALUATOR_", "AWS_", "PYTHON"))
+        ]
+
+    def test_the_inherited_list_is_the_one_pinned_here(self) -> None:
+        """Adding a name widens what a shell can hand the broker, and deleting
+        one breaks a machine that needed it. Either is an edit to this file too.
+        Compared as the names on one side only, so a failure reads as the name."""
+        assert set(BROKER_INHERITED_ENV_VARS) ^ set(_INHERITED_FROM_THE_SHELL) == set()
+
+    @pytest.mark.parametrize("name", _INHERITED_FROM_THE_SHELL)
+    def test_what_the_machine_needs_still_arrives(
+        self, broker_environment: Any, monkeypatch: Any, name: str
+    ) -> None:
+        """Dropping too much fails further away than passing too much: without
+        `PATH` a wrapped server's command is not found, `USER` is where a ceremony
+        record's operator name is read from, and without the proxy a remote
+        server is unreachable. Every name, in both environments, because the one
+        left out of a sample is the one that goes missing unnoticed."""
+        monkeypatch.setenv(name, _AS_THE_MACHINE_HAS_IT)
+        assert broker_environment()[name] == _AS_THE_MACHINE_HAS_IT
 
 
 class TestProjectSlug:

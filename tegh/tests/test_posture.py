@@ -371,6 +371,29 @@ def test_the_signature_gap_is_named_while_tegh_names_no_verify_keys(
     assert "ISSUER_VERIFY_KEYS_FILE" in line.detail
 
 
+@pytest.mark.parametrize("name", ["ISSUER_VERIFY_KEYS_FILE", "EVALUATOR_VERIFY_KEYS_FILE"])
+def test_a_verify_keys_file_named_in_the_shell_reaches_the_audit_alone(
+    project, store, monkeypatch, name
+):
+    """The skipped-rules line tells the reader a rule runs if the calling
+    environment names a verify-keys file. `ceremony_env` no longer inherits the
+    shell (#5), so the audit carries these two names itself; if it stopped, that
+    line would be advice nobody could follow. No ceremony leg gets them."""
+    monkeypatch.setenv(name, "/somewhere/verify-keys.json")
+    store.db_path.write_text("")
+    handed_over: list[dict] = []
+
+    def run(env, db_path):
+        handed_over.append(dict(env))
+        return _fake_audit(0, _clean_payload())(env, db_path)
+
+    _report(project, store, audit_runner=run)
+
+    (env,) = handed_over
+    assert env[name] == "/somewhere/verify-keys.json"
+    assert name not in store.ceremony_env(role="checker", project=project)
+
+
 # ---------------------------------------------------------------------------
 # Lock state — three-state verification survives into the report
 # ---------------------------------------------------------------------------

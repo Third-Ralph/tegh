@@ -18,6 +18,8 @@ SDK, in child processes. This module itself imports neither.
 from __future__ import annotations
 
 import json
+import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -33,6 +35,7 @@ from tegh.launch import (  # noqa: E402
 )
 from tegh.store import TeghStore  # noqa: E402
 from tegh.tests.wrapping import (  # noqa: E402
+    TOY,
     tape_records,
     wrap_admit_all,
     wrap_as_reads,
@@ -305,23 +308,24 @@ def test_the_gateway_does_not_inherit_this_process_environment(
 ) -> None:
     """The child gets the six variables a harness passes and nothing from here.
 
-    Three variables are poisoned in THIS process. Only one of them carries the
-    behavioural half of this test, and it matters which:
+    Three variables are poisoned in THIS process:
 
     - `BROKER_SQLITE_GRANTS_PATH` names a grants database that does not exist.
-      `TeghStore.gateway_env` starts from the gateway's own environment and
-      does not set this one, so it reaches the broker if the spawn inherits.
-      Checked by mutation: with the spawn inheriting, the answer below becomes
-      "refused by the broker: tool not granted to this principal".
+      It is the one that used to carry the behavioural half here: the gateway's
+      own environment inherited everything, so an inheriting spawn delivered it
+      to the broker and the answer below became "refused by the broker: tool
+      not granted to this principal". The gateway drops it itself now (#5), and
+      `test_a_broker_variable_in_the_shell_does_not_reach_the_broker` is where
+      that is driven; what is left for this test is the spawn.
     - `TEGH_HOME` names an empty directory and `BROKER_MANIFEST` a missing file.
       Neither changes the answer even when inherited (the command line names
-      the home, and `gateway_env` overwrites the manifest), which was also
-      checked by mutation. They are the two a reader would reach for first, so
-      they stay, and the structural assertions are what cover them.
+      the home, and `gateway_env` sets the manifest), which was checked by
+      mutation. They are the two a reader would reach for first, so they stay.
 
-    The answer has to be the SAME held call the harness's client gets. An
-    inheriting spawn is what hid the missing `--home` once: the test passed on
-    its own leaked environment and the first real operator's harness failed.
+    The structural assertions are what cover all three. The answer has to be
+    the SAME held call the harness's client gets. An inheriting spawn is what
+    hid the missing `--home` once: the test passed on its own leaked
+    environment and the first real operator's harness failed.
     """
     empty_home = tmp_path / "not-a-tegh-home"
     empty_home.mkdir()
@@ -345,6 +349,111 @@ def test_the_gateway_does_not_inherit_this_process_environment(
     assert spawn["env"] is not None, "env=None means INHERIT to subprocess"
     assert set(spawn["env"]) <= set(HARNESS_SPAWN_ENV_VARS), sorted(spawn["env"])
     assert not set(poison) & set(spawn["env"])
+
+
+def _exported_while_wrapping(harness: dict, monkeypatch, name: str, value: str) -> None:
+    """The shell that ran `tegh wrap` had it; the ceremony commands are the target."""
+    monkeypatch.setenv(name, value)
+    assert wrap_admit_all(harness) == 0
+    monkeypatch.delenv(name)
+
+
+def _exported_where_the_gateway_starts(harness: dict, monkeypatch, name: str, value: str) -> None:
+    """Whatever started `tegh gateway` had it; the gateway's own broker is the target.
+
+    A harness that passes its whole environment to a stdio child does this, and
+    so does starting the gateway by hand. `tegh call` passes six names, so its
+    spawn is widened by exactly this one variable to stand in for either.
+    """
+    assert wrap_admit_all(harness) == 0
+    monkeypatch.setattr(
+        call_module, "harness_spawn_env", lambda: {**harness_spawn_env(), name: value}
+    )
+
+
+@pytest.mark.parametrize(
+    "exported",
+    [
+        pytest.param(_exported_while_wrapping, id="ceremony"),
+        pytest.param(_exported_where_the_gateway_starts, id="gateway"),
+    ],
+)
+def test_a_broker_variable_in_the_shell_does_not_reach_the_broker(
+    harness, spawned, monkeypatch, tmp_path, capsys, exported
+) -> None:
+    """`BROKER_SQLITE_GRANTS_PATH` in the shell changes nothing, in either environment (#5).
+
+    tegh never names this variable and the base reads it at boot, as the place
+    the grants live when they are split from the rest of the store. Inherited by
+    the ceremony, the grants a wrap issues land in a database the gateway never
+    opens. Inherited by the gateway, it looks for them in a database the wrap
+    never wrote. Either way the admitted call comes back "refused by the
+    broker: tool not granted to this principal", which is the answer both
+    cases gave before the environments stopped starting from `os.environ`.
+
+    The answer asserted is the one an untouched wrap gives: held for approval.
+    """
+    elsewhere = tmp_path / "grants-from-the-shell.db"
+    assert main(["init"]) == 0
+    exported(harness, monkeypatch, "BROKER_SQLITE_GRANTS_PATH", str(elsewhere))
+    capsys.readouterr()
+
+    rc = _call(harness, _ADMITTED, "--args", _ENTRY)
+    out, err = capsys.readouterr()
+
+    assert (rc, err) == (1, ""), (rc, out, err)
+    assert "held for approval" in out, out
+    assert not elsewhere.exists(), "nothing tegh started should have opened it"
+    # The gateway case is only a test if the variable really was handed over.
+    (spawn,) = spawned
+    assert ("BROKER_SQLITE_GRANTS_PATH" in spawn["env"]) == (
+        exported is _exported_where_the_gateway_starts
+    )
+
+
+def test_a_server_named_by_a_bare_command_is_found_through_path(
+    harness, tmp_path, monkeypatch, capsys
+) -> None:
+    """What the broker inherits is what finds a wrapped server's command.
+
+    Every other test here names the toy by this interpreter's absolute path, so
+    none of them can tell whether the broker's own processes kept `PATH`. This
+    one names it the way an `npx` server is named: a bare command, found in a
+    directory that is on `PATH` and nowhere else. The broker's MCP client builds
+    a stdio server's environment out of the broker's own, so the command is
+    found only if `PATH` came through, twice:
+
+    - the wrap, where the ceremony's snapshot starts the server, and
+    - the call, where the gateway does. The call has to EXECUTE for that, which
+      is why the wrap corrects the tools to reads: a held call starts nothing.
+
+    Checked by mutation, for each: with `PATH` off the inherited list the wrap
+    fails at the snapshot, and with it dropped from the gateway's environment
+    alone the wrap passes and the call does not execute.
+    """
+    bin_dir = tmp_path / "only-on-path"
+    bin_dir.mkdir()
+    launcher = bin_dir / "toy-ledger"
+    launcher.write_text(f'#!/bin/sh\nexec "{sys.executable}" -m {TOY} "$@"\n', encoding="utf-8")
+    launcher.chmod(0o755)
+    monkeypatch.setenv("PATH", os.pathsep.join([str(bin_dir), os.environ["PATH"]]))
+
+    document = json.loads(harness["claude_json"].read_text(encoding="utf-8"))
+    servers = document["projects"][str(harness["project"])]["mcpServers"]
+    servers["ledger"] = {"command": launcher.name}
+    harness["claude_json"].write_text(
+        json.dumps(document, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+    assert main(["init"]) == 0
+    rc = wrap_as_reads(harness)
+    out, err = capsys.readouterr()
+    assert rc == 0, (out, err)
+
+    rc = _call(harness, _ADMITTED, "--args", _ENTRY)
+    out, err = capsys.readouterr()
+    assert (rc, err) == (0, ""), (rc, out, err)
+    assert "opening balance" in out, out
 
 
 @pytest.mark.parametrize(
