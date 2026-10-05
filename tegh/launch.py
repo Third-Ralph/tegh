@@ -92,10 +92,32 @@ BROKER_INHERITED_ENV_VARS: tuple[str, ...] = (
     "SSL_CERT_DIR",
 )
 
+#: The interpreter option every Python process tegh starts is given: with it,
+#: the directory tegh is run from is not on the child's import path. A child
+#: finds the base and its dependencies where they are installed, whatever
+#: directory `tegh` was typed in.
+#:
+#: An option on the command line and not the `PYTHONSAFEPATH` variable, because
+#: the environments tegh builds drop every `PYTHON*` name on purpose
+#: (`BROKER_INHERITED_ENV_VARS`), and because the launcher form below is
+#: started by a harness with an environment tegh does not build at all.
+SAFE_PATH_FLAG = "-P"
+
 #: How long `tegh call` waits for each reply from the gateway before giving up.
 #: Generous on purpose: the first call starts the connector behind the tool, and a
 #: cold `npx` connector downloads its package before it can answer.
 DEFAULT_CALL_TIMEOUT_SECONDS = 120.0
+
+
+def python_module_argv(module: str, *args: str) -> list[str]:
+    """`<this interpreter> -P -m <module> <args>`: the one way tegh starts Python.
+
+    Every Python child goes through here: the ceremony and grant commands, the
+    gateway, the release, the store audit, the tape reader, and tegh itself in
+    the launcher form `tegh_launcher` writes into a harness config. One
+    spelling, so that `SAFE_PATH_FLAG` is on all of them or on none.
+    """
+    return [sys.executable, SAFE_PATH_FLAG, "-m", module, *args]
 
 
 def tegh_launcher() -> list[str]:
@@ -107,9 +129,11 @@ def tegh_launcher() -> list[str]:
 
     1. the installed console script, when it exists on disk beside this
        interpreter (the `pip install tegh` case), and
-    2. `<this interpreter> -m tegh.cli` otherwise, which is what an editable
+    2. `<this interpreter> -P -m tegh.cli` otherwise, which is what an editable
        checkout without the console script on disk has. `tegh` is a top-level
-       package, so this form works wherever `tegh` is importable.
+       package, so this form works wherever `tegh` is installed for that
+       interpreter. It does not look for `tegh` in the directory the harness
+       starts it in (`SAFE_PATH_FLAG`); the console script never did.
 
     Preferring the console script is not cosmetic: it survives the interpreter
     path changing under a venv rebuild, which the `-m` form does not.
@@ -117,7 +141,7 @@ def tegh_launcher() -> list[str]:
     scripted = Path(sys.executable).with_name("tegh")
     if scripted.exists():
         return [str(scripted)]
-    return [sys.executable, "-m", "tegh.cli"]
+    return python_module_argv("tegh.cli")
 
 
 def gateway_argv(

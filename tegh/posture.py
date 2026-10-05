@@ -63,14 +63,13 @@ from __future__ import annotations
 
 import json
 import subprocess
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal, Optional
 
 import yaml
 
-from tegh.launch import inherited_env
+from tegh.launch import inherited_env, python_module_argv
 from tegh.lock import Harness
 from tegh.lockfile import LoadedLock, LockSignatureInvalid, lock_paths
 from tegh.signing import UnknownLockSigner
@@ -551,7 +550,7 @@ def _project_lines(
 # Store integrity: the base's store audit, shelled out to (never imported)
 # ---------------------------------------------------------------------------
 
-_AUDIT_COMMAND = [sys.executable, "-m", "safe_agents.broker.grants.audit_command"]
+_AUDIT_COMMAND = python_module_argv("safe_agents.broker.grants.audit_command")
 
 #: Every MCP-registry rule the base's audit reports is named with this prefix,
 #: and its findings share the grants' `violations` list (the `report_to_dict`

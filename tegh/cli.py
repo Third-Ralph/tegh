@@ -72,6 +72,7 @@ from tegh.launch import (
     BROKER_INHERITED_ENV_VARS,
     DEFAULT_CALL_TIMEOUT_SECONDS,
     inherited_env,
+    python_module_argv,
     tegh_launcher,
 )
 from tegh.lock import (
@@ -126,7 +127,7 @@ HARNESS_ALIASES = {
     Harness.CLAUDE_CODE.value: Harness.CLAUDE_CODE,
 }
 
-_CEREMONY = [sys.executable, "-m", "safe_agents.broker.mcp.commands"]
+_CEREMONY = python_module_argv("safe_agents.broker.mcp.commands")
 _PROPOSAL_TTL_HOURS = "1"
 
 #: Answer for one tool in the batched review.
@@ -1146,7 +1147,7 @@ def _seed_grants(store: TeghStore, project: Path) -> bool:
     env = store.ceremony_env(role="maker", project=project)
     env["BROKER_MANIFEST"] = str(store.manifest_path(project))
     seed = subprocess.run(  # noqa: S603 — fixed argv, no shell
-        [sys.executable, "-m", "safe_agents.broker.grants.commands", "seed"],
+        python_module_argv("safe_agents.broker.grants.commands", "seed"),
         env=env,
         capture_output=True,
         text=True,
@@ -1276,11 +1277,8 @@ def gateway_command(args: argparse.Namespace) -> int:
 
     import os  # noqa: PLC0415 — only the exec path needs it
 
-    os.execve(  # noqa: S606 — fixed argv, no shell
-        sys.executable,
-        [sys.executable, "-m", "safe_agents.broker.gateway"],
-        env,
-    )
+    argv = python_module_argv("safe_agents.broker.gateway")
+    os.execve(argv[0], argv, env)  # noqa: S606 — fixed argv, no shell
 
 
 def approve_command(args: argparse.Namespace) -> int:
@@ -1312,7 +1310,7 @@ def approve_command(args: argparse.Namespace) -> int:
         )
         return 2
 
-    argv = ["-m", "safe_agents.broker.approval.release_cli", args.intent_id]
+    argv = python_module_argv("safe_agents.broker.approval.release_cli", args.intent_id)
     if args.yes:
         argv.append("--yes")
     if args.json:
@@ -1320,7 +1318,7 @@ def approve_command(args: argparse.Namespace) -> int:
     # Not captured: the confirmation prompt needs this terminal's stdin, and the
     # render needs its stdout.
     return subprocess.run(  # noqa: S603 — fixed argv, no shell
-        [sys.executable, *argv],
+        argv,
         env=store.gateway_env(project=project),
         check=False,
     ).returncode
@@ -1343,7 +1341,7 @@ def audit_command(args: argparse.Namespace) -> int:
     store = TeghStore(home=Path(args.home).expanduser() if args.home else tegh_home())
     tape = store.audit_path(project)
 
-    argv = ["-m", "safe_agents.broker.auditor.tape_cli", "--path", str(tape)]
+    argv = python_module_argv("safe_agents.broker.auditor.tape_cli", "--path", str(tape))
     if args.verify:
         argv.append("--verify")
     if args.json:
@@ -1354,7 +1352,7 @@ def audit_command(args: argparse.Namespace) -> int:
     # does, and nothing else from the shell: it reads the one file it is given
     # and no variable.
     return subprocess.run(  # noqa: S603 — fixed argv, no shell
-        [sys.executable, *argv], env=inherited_env(BROKER_INHERITED_ENV_VARS), check=False
+        argv, env=inherited_env(BROKER_INHERITED_ENV_VARS), check=False
     ).returncode
 
 
