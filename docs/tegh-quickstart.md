@@ -90,7 +90,7 @@ PY
 will rewrite. Claude Code reads it when you set `CLAUDE_CONFIG_DIR` to that directory, which is how
 §5 drives the demo without going near your real config.
 
-To wrap a project you already use, skip this step and pass your real home instead — but read §8
+To wrap a project you already use, skip this step and pass your real home instead — but read §9
 first, and know that `tegh unwrap` restores the config byte-for-byte, after showing you what it
 will change.
 
@@ -140,9 +140,10 @@ shown so you can overrule it with `e`. `[DEFAULT]` is a field nobody proposed. A
 about `readOnlyHint` is exactly the case this review exists for.
 
 Look at the `reversible` line. The server says a mistaken `create_entities` is recoverable, and that
-claim decides what happens at call time: the broker lets a reversible external write run and holds
-an irreversible one for your approval. For this walk, do not take the server's word. Answer `e`,
-keep `effect`, set `reversible` to `n`, keep `egress_arg`:
+claim decides what happens at call time: the broker holds every irreversible external write for your
+approval, and lets a reversible one run when the turn making it has read nothing from outside. For
+this walk, do not take the server's word. Answer `e`, keep `effect`, set `reversible` to `n`, keep
+`egress_arg`:
 
 ```
   create_entities: [y] admit  [e] edit classification  [N] skip e
@@ -213,10 +214,16 @@ Restore with: tegh unwrap --project /Users/you/tegh-demo
 
 The harness config now names one server, `tegh`, and the memory server is reached only through it.
 
-> If you admit `create_entities` as the server proposes it, with `y` alone, the rest of this walk
-> does not happen: the write in §5 executes without a hold, because you accepted the server's claim
-> that it is reversible. That is the control working as configured, and it is why the claim is
-> marked `[UNTRUSTED]`.
+> If you admit `create_entities` as the server proposes it, with `y` alone, the classification no
+> longer holds the write. Made on its own with `tegh call` (§5), it executes, because you accepted
+> the server's claim that it is reversible. That is the control working as configured, and it is why
+> the claim is marked `[UNTRUSTED]`. Claude Code's write in §5 is held either way, for the second
+> reason §5 describes: it comes after a read.
+
+**The per-tool budget.** Every admitted tool is granted a number of calls per day, 200 unless
+you pass `--daily-cap N` to `tegh wrap`. A call past the cap is refused with `capacity budget
+breached` and recorded. The count is kept per tool, so one tool running out does not stop the
+others.
 
 > **Do not use `--admit-all` here.** It admits every proposal as-is, so a server that advertises no
 > annotations yields tools classified as irreversible writes — and the broker then holds EVERY call
@@ -245,8 +252,15 @@ That is the whole thesis in one line, and note **who said it**: the agent report
 being stopped. It did not have the option of not telling you, because the refusal came back in
 place of the result.
 
-`create_entities` is held because it is an irreversible external write. The broker decided that
-from the classification you set in §4 — not from anything the agent or the server said at call time.
+The broker has two grounds for holding it, and the audit tape (§7) names the one that applied:
+
+- **`tainted external write`** is what the tape says when Claude Code made the call. The session
+  had already read the graph, and once a turn has read anything from outside, the broker holds every
+  external write in it, a reversible one included. What the agent read may be steering what it
+  writes, so a person decides. You did not configure this rule and cannot admit your way past it.
+- **`irreversible external write`** is what the tape says when the write is the first thing in its
+  turn, which is the `tegh call` below. This one comes from the classification you set in §4, not
+  from anything the agent or the server said at call time.
 
 To see the broker's answers verbatim, or to do this step without Claude Code, `tegh call` drives one
 call through the same gateway as the same principal. The samples on this page were captured this
@@ -259,7 +273,8 @@ tegh call memory__create_entities --project "$(pwd)" \
 ```
 
 The first prints the server's result and exits 0. The second prints the held line above and exits 1.
-Your intent id will differ from the one shown here.
+Your intent id will differ from the one shown here. Each `tegh call` is its own turn, so the read in
+the first command does not taint the write in the second.
 
 ## 6. Release it
 
@@ -360,6 +375,10 @@ CHAIN CONSISTENT — 3 records, seq 0..2
   The chain is unkeyed SHA-256, so this proves the tape is SELF-CONSISTENT: no record was edited, dropped or reordered in place. It is NOT tamper-evidence — anyone who can write this file can rewrite it whole and recompute every hash. That needs off-device append-only storage (posture 3, docs/posture-ladder.md).
 ```
 
+This tape came from the two `tegh call` commands in §5, which is why record 1 gives `irreversible
+external write` as its reason. Driven from Claude Code, the same record reads `tainted external
+write`, because the session read the graph first.
+
 Records 1 and 2 are the interesting pair: the same `argsDigest` and the same `intentId`, one held
 and one executed. That is the proof that what you approved is what ran — the digest on the release
 is recomputed from the stored bytes, never copied off the hold.
@@ -403,7 +422,61 @@ more record, which is yours:
          why  no manifest entry for memory.delete_entities
 ```
 
-## 8. Undo
+## 8. Check the pins
+
+`tegh.lock` in the project is the signed record of what you admitted. Two commands read it, and
+neither changes anything:
+
+```bash
+tegh status --project "$(pwd)"
+tegh diff --project "$(pwd)"
+```
+
+`tegh status` checks the lock against its signature and lists each pinned tool with the
+classification that binds:
+
+```
+/Users/you/tegh-demo/tegh.lock  (format v1, generated 2026-10-05T12:57:46.666945+00:00)
+  signature: present, VERIFIED against tegh-local-60db415f342a
+
+  memory  [claude-code / local / stdio]  npx -y @modelcontextprotocol/server-memory
+    create_entities              write external=true  reversible=false [solo-attested by local-solo:tegh-local-60db415f342a]
+    open_nodes                   read  external=true  reversible=none  [solo-attested by local-solo:tegh-local-60db415f342a]
+    read_graph                   read  external=true  reversible=none  [solo-attested by local-solo:tegh-local-60db415f342a]
+    search_nodes                 read  external=true  reversible=none  [solo-attested by local-solo:tegh-local-60db415f342a]
+```
+
+If the lock was edited after it was signed, `tegh status` prints `TAMPER`, says the lock does not
+match its signature, and exits 3. An edit to the lock changes no decision, because the broker does
+not read it (`docs/tegh-lock.md`, TL1); what the edit does is show up here.
+
+`tegh diff` spawns each server again and compares what it advertises now with what you admitted:
+
+```
+lock signature: present, VERIFIED against tegh-local-60db415f342a
+
+
+  memory: 5 advertised tool(s) not admitted (not callable): add_observations, create_relations, delete_entities, delete_observations, delete_relations
+
+DRIFT=0 WITHDRAWN=0 UNCHANGED=4 UNADMITTED=5
+```
+
+It exits 0 when nothing has drifted and 1 when something has. A tool drifts when the server changes
+its definition after you admitted it. A changed description is the case to care about, since the
+description is text written by the server for the model to read. `tegh diff` prints the admitted
+description and the live one in full, one above the other. Until you admit the tool again the broker
+refuses calls to it, the tape records `not callable (drifted)`, and the server's other tools keep
+working. The memory server does not change its descriptions, so this walk cannot show you a drift.
+
+Two things about recovering from one, as of 0.1.1:
+
+- The drift report ends by naming a flag, `--acknowledge-description-change`, that no `tegh` command
+  accepts (#10). To admit the changed tool, run `tegh unwrap` and then `tegh wrap` again. The review
+  shows you the live description, and what you admit there is what gets pinned.
+- Run `tegh unwrap` first. A `tegh wrap` on a project that is still wrapped finds only the gateway,
+  admits nothing, and replaces `tegh.lock` with an empty one (#11).
+
+## 9. Undo
 
 ```bash
 tegh unwrap --project "$(pwd)"
@@ -437,6 +510,10 @@ unwrapped /Users/you/tegh-demo (wrapped 2026-10-04T15:11:54.699203+00:00). The h
 ```
 
 Restores the displaced config **byte-for-byte**, with the permission bits the file already had.
+
+The closing line says re-wrapping does not re-run the ceremony. As of 0.1.1 a second `tegh wrap`
+does ask the tool review again, for every tool (#13). It remembers only the values you classified as
+configuration.
 Only the files the unwrap really changes are listed: this project had no `.mcp.json` and no
 user-scope servers, so neither appears.
 

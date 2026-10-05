@@ -89,8 +89,9 @@ python -m pip install --require-hashes -r tegh-<version>-requirements.txt
 ```
 
 `docs/tegh-quickstart.md` walks the whole path: `tegh init`, `tegh wrap claude` with a reviewed
-admission, a call held and released with `tegh approve`, a call refused, and `tegh audit --verify`.
-`docs/tegh-lock.md` describes the lockfile.
+admission, a call held and released with `tegh approve`, a call refused, `tegh audit --verify`,
+`tegh status` and `tegh diff` against the lock, and `tegh unwrap`. `docs/tegh-lock.md` describes the
+lockfile.
 
 ## How it relates to the platform
 
