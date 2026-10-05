@@ -438,7 +438,16 @@ def _load_site(site: ConfigSite) -> tuple[Optional[Any], dict[str, Any], bool]:
     if not site.path.exists():
         return None, {}, False
 
-    raw = site.path.read_text(encoding="utf-8")
+    try:
+        raw = site.path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        # The position and nothing else of the error: its own text quotes the
+        # byte, and a byte of this file can be a byte of a credential.
+        raise InterposeError(
+            f"{site.path} is not UTF-8 text (byte {exc.start} does not decode) — "
+            "refusing to rewrite a config tegh cannot read: its servers would "
+            "stay live while the wrap reported success."
+        ) from None
     try:
         document = json.loads(raw)
     except json.JSONDecodeError as exc:
