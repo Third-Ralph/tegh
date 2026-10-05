@@ -71,6 +71,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 
 from tegh.configvalues import SECRET_BEARING_BLOCKS, literal_fields
 from tegh.discovery import ConfigScope
+from tegh.launch import gateway_home_in
 
 #: The serialization tegh writes back. Not a style preference — it is the one
 #: form observed to reproduce a real `~/.claude.json` byte-for-byte, and
@@ -694,9 +695,11 @@ def plan_interposition(
         if not block:
             continue
         assert_no_inline_secrets(site, block, cleared=cleared_config)
-        names = sorted(name for name in block if name != gateway_name)
-        if names:
-            plan.displaced[site.label] = names
+        # Every entry, whatever it is called. A server of the user's own named
+        # like the gateway entry is displaced and restored with the rest, so it
+        # is listed with the rest. This project's gateway is never among them:
+        # a wrap refuses a project that already runs it before it plans.
+        plan.displaced[site.label] = sorted(block)
     return plan
 
 
@@ -806,12 +809,12 @@ _UNRECORDED_GATEWAY_NAME = "tegh"
 
 
 def _gateway_name_at(backup: WrapBackup, site: ConfigSite) -> Optional[str]:
-    """The name of the entry the wrap added at `site`, or None if it added none.
+    """The name the wrap gave the entry it added at `site`, or None if it added none.
 
-    A backup that recorded its gateway answers exactly. One that did not is
-    read as "an entry named `tegh`, wherever it is": the wrap put one there,
-    and the cost of the guess is confined to a user who has since added a
-    server of their own under that name at another scope.
+    What the wrap CALLED its entry, for the plan to say, and not how the entry
+    is found now: that is `_runs_gateway`, which reads the command. A backup
+    that recorded its gateway answers exactly. One that did not answers
+    `tegh` at every site, the only name a wrap has used.
     """
     if backup.gateway_name is None:
         return _UNRECORDED_GATEWAY_NAME
@@ -841,12 +844,21 @@ class SiteRestore:
     #: `block` plus the kept entries. With nothing kept it IS `block`, in the
     #: same order, which is what keeps the restore byte-for-byte.
     target: dict[str, Any] = field(repr=False, default_factory=dict)
+    #: What the wrap called the entry it added here (`_gateway_name_at`).
     gateway_name: Optional[str] = None
+    #: The entries at the site now that run this project's gateway, by name:
+    #: what the unwrap takes out. Usually the one name above. Another name, or
+    #: a name at a site the wrap added nothing to, is an entry renamed or moved
+    #: since, and the plan has a line for it.
+    gateway_found: tuple[str, ...] = ()
     #: Credential coordinates the site already held when the store did not.
     in_place: tuple[Coordinate, ...] = ()
     #: The wrap CREATED this site's file: it was not there before, and the
     #: gateway entry went into it. Never true for a file the wrap only read.
     file_created: bool = False
+    #: The project the backup is for, which is how an entry that runs its
+    #: gateway is told from a server of the user's (`_runs_gateway`).
+    project: Optional[str] = None
     #: The unwrap removes the file: the wrap created it, and with the wrap's
     #: own entries taken out nothing is left in it. One server or one other
     #: key added since is enough to keep the file, holding just that. The same
@@ -866,6 +878,25 @@ class SiteRestore:
         return self.block_existed or bool(self.kept)
 
 
+def _runs_gateway(entry: Any, project: Optional[str]) -> bool:
+    """Whether a config entry runs tegh's gateway for `project`.
+
+    Read from what the entry RUNS, the same reading `tegh wrap` uses to refuse
+    a second wrap, so the two cannot disagree about one entry. The name is not
+    the test, in either direction. A gateway entry that was renamed, or moved
+    to another scope, is still the wrap's, and an unwrap that kept it as "added
+    since the wrap" would leave a project the next wrap refuses with no backup
+    left to unwrap from. And an entry that is only CALLED what the wrap called
+    its own, and runs something else, is a server of the user's.
+    """
+    if project is None or not isinstance(entry, Mapping):
+        return False
+    command, args = entry.get("command"), entry.get("args", [])
+    if not isinstance(command, str) or not isinstance(args, list):
+        return False
+    return gateway_home_in([command, *map(str, args)], project=project) is not None
+
+
 def _merged(
     site: ConfigSite,
     block: dict[str, Any],
@@ -874,8 +905,13 @@ def _merged(
     in_place: Sequence[Coordinate] = (),
     *,
     file_created: bool = False,
+    project: Optional[str] = None,
 ) -> SiteRestore:
     """Merge the pre-wrap block with what the site holds NOW. Reads, never writes.
+
+    The wrap's own entry comes out: any entry, under any name and at any site,
+    that runs this project's gateway (`_runs_gateway`). Nothing comes out for
+    its name alone. `gateway_name` is carried for the plan to say.
 
     Raises `RestoreCollision` when the site holds an entry under the name of a
     pre-wrap server and the two differ: keeping one would silently drop the
@@ -885,9 +921,11 @@ def _merged(
     """
     _, current, exists_now = _load_site(site)
     kept: dict[str, Any] = {}
+    gateway_found: list[str] = []
     collisions: list[str] = []
     for name, entry in current.items():
-        if name == gateway_name:
+        if _runs_gateway(entry, project):
+            gateway_found.append(name)
             continue
         if name not in block:
             kept[name] = entry
@@ -912,8 +950,10 @@ def _merged(
         kept=tuple(kept),
         target=target,
         gateway_name=gateway_name,
+        gateway_found=tuple(gateway_found),
         in_place=tuple(in_place),
         file_created=file_created,
+        project=project,
     )
     holds = exists_now == step.target_exists and current == target
     return replace(step, changes=not holds)
@@ -1036,6 +1076,7 @@ def plan_restore(
                 _gateway_name_at(backup, site),
                 in_place,
                 file_created=site_backup.path in created,
+                project=backup.project,
             )
         )
     return _with_file_fate(prepared)
@@ -1049,14 +1090,14 @@ def recheck_restore(steps: Sequence[SiteRestore]) -> list[SiteRestore]:
     so what is written keeps what is there NOW. If the entries kept differ from
     the ones the plan named, the person agreed to something else: this raises
     `ConfigChangedSincePlan` before any site is written. The same goes for a
-    file the wrap created, when what the plan showed happening to it is no
-    longer what would happen.
+    gateway entry the plan did not name, and for a file the wrap created, when
+    what the plan showed happening to it is no longer what would happen.
     """
     fresh = _with_file_fate(
         [
             _merged(
                 step.site, step.block, step.block_existed, step.gateway_name,
-                step.in_place, file_created=step.file_created,
+                step.in_place, file_created=step.file_created, project=step.project,
             )
             for step in steps
         ]
@@ -1092,6 +1133,17 @@ def recheck_restore(steps: Sequence[SiteRestore]) -> list[SiteRestore]:
                 f"the plan showed tegh {was}, and it now {is_now}. Nothing was "
                 "changed. Run `tegh unwrap` again for a plan of what is there "
                 "now."
+            )
+        unnamed = set(now.gateway_found) - set(planned.gateway_found)
+        if unnamed:
+            # One that has gone since is no reason to stop: the plan said it
+            # would go. One that has appeared is a removal nobody was shown.
+            raise ConfigChangedSincePlan(
+                f"{planned.site.label} changed while tegh unwrap was waiting: "
+                f"it now holds {_names(unnamed)}, running tegh's gateway for "
+                "this project, which the plan did not show being removed. "
+                "Nothing was changed. Run `tegh unwrap` again for a plan of "
+                "what is there now."
             )
         if set(planned.kept) != set(now.kept):
             raise ConfigChangedSincePlan(

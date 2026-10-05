@@ -421,7 +421,10 @@ def test_only_sites_the_unwrap_changes_are_listed(
     )
     backup = interpose.apply_interposition(
         interpose.plan_interposition(
-            sites=sites, gateway_site=gateway_site, gateway_entry={"command": "tegh"}
+            sites=sites, gateway_site=gateway_site,
+            gateway_entry=claude_code.gateway_entry(
+                project, launcher=["tegh"], home=tmp_path / "tegh"
+            ),
         ),
         wrapped_at="t", project=project, harness="claude-code",
     )

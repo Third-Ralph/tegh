@@ -367,6 +367,10 @@ def _interposition_line(wrapped: bool) -> PostureLine:
 def _is_interposed(project: Path, harness: Harness, home: Path | None = None) -> bool:
     """True when this project's harness config names tegh's gateway and nothing else.
 
+    The gateway is the entry that RUNS this project's gateway, under any name:
+    the reading `tegh wrap` and `tegh unwrap` use. A lone server of the user's
+    own that happens to be called `tegh` gates nothing and is not it.
+
     Deliberately reads the CONFIG, not tegh's own backup file: the question is
     what the harness would load, and a stale backup would answer a different
     question. Any failure to read answers `False` — an unreadable config cannot
@@ -375,7 +379,7 @@ def _is_interposed(project: Path, harness: Harness, home: Path | None = None) ->
     """
     try:
         from tegh.harnesses import gateway_config_site  # noqa: PLC0415
-        from tegh.interpose import _load_site  # noqa: PLC0415
+        from tegh.interpose import _load_site, _runs_gateway  # noqa: PLC0415
 
         gateway_site = gateway_config_site(harness, project, home=home)
         if gateway_site is None:
@@ -383,7 +387,9 @@ def _is_interposed(project: Path, harness: Harness, home: Path | None = None) ->
         _, block, _ = _load_site(gateway_site)
     except Exception:  # noqa: BLE001 — any failure means "not proven interposed"
         return False
-    return list(block) == ["tegh"]
+    return len(block) == 1 and all(
+        _runs_gateway(entry, str(project)) for entry in block.values()
+    )
 
 
 def _invariant_gaps(wrapped: bool = False) -> list[PostureLine]:

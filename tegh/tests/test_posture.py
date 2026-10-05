@@ -20,10 +20,11 @@ from pathlib import Path
 import pytest
 import yaml
 
-from tegh.harnesses import durability_line
+from tegh.harnesses import claude_code, durability_line
 from tegh.lock import Harness
 from tegh.posture import (
     PostureLine,
+    _is_interposed,
     build_report,
     render,
     to_dict,
@@ -118,6 +119,51 @@ def test_the_rung_is_pre_1_while_nothing_is_interposed(project, store):
 
     assert report.posture == "pre-1"
     assert report.rung_reason.holds == "partial"
+
+
+def _gateway(project: Path) -> dict:
+    return claude_code.gateway_entry(project, launcher=["/venv/bin/tegh"], home="/h/.tegh")
+
+
+@pytest.mark.parametrize(
+    ("servers", "interposed"),
+    [
+        pytest.param(lambda project: {"tegh": _gateway(project)}, True, id="as-a-wrap-writes-it"),
+        # Read from what the entry runs, as wrap and unwrap read it.
+        pytest.param(lambda project: {"broker": _gateway(project)}, True, id="renamed"),
+        pytest.param(
+            lambda project: {"tegh": {"command": "npx", "args": ["-y", "a-server"]}},
+            False,
+            id="a-server-only-called-tegh",
+        ),
+        pytest.param(
+            lambda project: {"tegh": _gateway(project.parent / "other")},
+            False,
+            id="another-projects-gateway",
+        ),
+        pytest.param(
+            lambda project: {"tegh": _gateway(project), "notes": {"command": "notes"}},
+            False,
+            id="the-gateway-and-a-server-beside-it",
+        ),
+        pytest.param(lambda project: {}, False, id="no-servers"),
+    ],
+)
+def test_interposed_means_the_one_server_runs_this_projects_gateway(
+    tmp_path, project, servers, interposed: bool
+):
+    home = tmp_path / "harness-home"
+    home.mkdir()
+    (home / ".claude.json").write_text(
+        # In the harness's own style, which tegh proves before it reads a block.
+        json.dumps(
+            {"projects": {str(project): {"mcpServers": servers(project)}}},
+            indent=2, ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    assert _is_interposed(project, Harness.CLAUDE_CODE, home) is interposed
 
 
 @pytest.mark.parametrize(

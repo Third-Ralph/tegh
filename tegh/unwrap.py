@@ -13,7 +13,10 @@ wrap records every site a harness has, and most of them never held a block.
 
 ## Only what the wrap put there comes out
 
-An unwrap removes the gateway entry and puts the pre-wrap servers back. A
+An unwrap removes the gateway entry and puts the pre-wrap servers back. The
+gateway entry is whichever entry runs this project's gateway, under any name
+and at any scope: one renamed or moved since the wrap is removed and the list
+says so, and a server that is only called `tegh` is not it. A
 server added to a wrapped scope SINCE the wrap is kept, and the list names it
 (`keep`), because it is the one line that says "this is not yours to lose"
 [ruling: maintainer, 2026-10-04]. A kept entry under the name of a server being
@@ -113,10 +116,17 @@ class UnwrapPlan:
         actions: list[Action] = []
         for step in self.sites:
             label = step.site.label
+            # The gateway entry where the wrap put it and under the name the
+            # wrap gave it is covered by the lines below. One found anywhere
+            # else, or under another name, gets a line of its own.
+            as_written = step.gateway_name in step.gateway_found
+            elsewhere = sorted(
+                name for name in step.gateway_found if name != step.gateway_name
+            )
             if step.changes and step.block_existed:
                 names = ", ".join(step.servers) or "an empty mcpServers block"
                 actions.append(Action("restore", "restored", f"{label}  ({names})"))
-            elif step.changes:
+            elif step.changes and (as_written or not elsewhere):
                 # The scope had no block before the wrap, so there is nothing
                 # to restore there. What the unwrap does is take out what the
                 # wrap put in, and it says that: the whole block, or only the
@@ -127,6 +137,18 @@ class UnwrapPlan:
                     else "the mcpServers block the wrap added"
                 )
                 actions.append(Action("remove", "removed", f"{label}  ({added})"))
+            # Recognised by the command it runs and not by its name, so a
+            # gateway entry renamed or moved since the wrap goes with the wrap.
+            # The line says why an entry the reader may not know as tegh's is
+            # being taken out.
+            actions.extend(
+                Action(
+                    "remove",
+                    "removed",
+                    f"{label}  ({name}), which runs tegh's gateway for this project",
+                )
+                for name in elsewhere
+            )
             if step.prunes_parents:
                 # Its own line, and not folded into the one above: it is the
                 # only line this file gets when the block is already out.
