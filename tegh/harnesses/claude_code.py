@@ -468,7 +468,7 @@ def gateway_entry(
     `launcher` is a full argv prefix rather than one executable because tegh is
     not always reachable as a console script — an editable checkout has no
     `tegh` on PATH, and the harness spawns stdio children with a minimal
-    environment, so `["<python>", "-m", "tegh.cli"]` is a real and
+    environment, so `["<python>", "-P", "-m", "tegh.cli"]` is a real and
     common form of the same command.
 
     `home` is written EXPLICITLY for the same reason the launcher is absolute:
