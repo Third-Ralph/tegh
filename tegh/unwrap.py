@@ -19,6 +19,13 @@ server added to a wrapped scope SINCE the wrap is kept, and the list names it
 [ruling: maintainer, 2026-10-04]. A kept entry under the name of a server being
 restored is refused before anything changes: `interpose.RestoreCollision`.
 
+A config FILE the wrap created goes the same way. When the harness had no file
+for the gateway entry, the wrap made one, and the backup records that. The
+unwrap removes that file if, with the wrap's entries out, nothing is left in
+it, and the list says so. Anything added to it since keeps the file, holding
+just that: the empty entry the wrap made for the project goes, on a line of its
+own. A file that was there before the wrap is never removed.
+
 ## The credential ends in exactly one place, and never in none
 
 A relocated credential lives in tegh's store while the project is wrapped. An
@@ -120,12 +127,36 @@ class UnwrapPlan:
                     else "the mcpServers block the wrap added"
                 )
                 actions.append(Action("remove", "removed", f"{label}  ({added})"))
+            if step.prunes_parents:
+                # Its own line, and not folded into the one above: it is the
+                # only line this file gets when the block is already out.
+                actions.append(
+                    Action(
+                        "remove",
+                        "removed",
+                        f"{label}  (the empty {step.site.pointer[0]} entry the "
+                        "wrap created for this project)",
+                    )
+                )
             # Listed whether or not the site is written: a kept entry is a
             # thing the reader might have expected to lose.
             actions.extend(
                 Action("keep", "kept", f"{label}  ({name}), added since the wrap")
                 for name in sorted(step.kept)
             )
+        # After the sites, since it is what is left of them: a file the wrap
+        # had to create, with nothing in it once the lines above are done.
+        actions.extend(
+            Action(
+                "remove",
+                "removed",
+                f"{path}  (the file itself, which the wrap created and nothing "
+                "else has been added to)",
+            )
+            for path in dict.fromkeys(
+                step.site.path for step in self.sites if step.removes_file
+            )
+        )
         written = {step.site.label for step in self.sites if step.changes}
         already_back = self.already_back
         for credential in self.credentials:
@@ -388,7 +419,7 @@ def _site_progress(plan: UnwrapPlan) -> tuple[list[str], list[str]]:
     restored: list[str] = []
     not_restored: list[str] = []
     for step in plan.sites:
-        if not step.changes:
+        if not (step.changes or step.removes_file):
             continue
         try:
             landed = interpose.site_restored(step)
