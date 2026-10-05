@@ -169,10 +169,13 @@ def test_a_wrap_that_admits_nothing_leaves_the_config_alone(harness, capsys) -> 
         ),
         prompt=lambda _: "n",
     )
-    out = capsys.readouterr().out
-    assert rc == 0
-    assert "left alone" in out, out
+    said = capsys.readouterr().err
+    # Not a wrap that succeeded at nothing: no lock pinning zero tools either.
+    # `test_wrap_transaction.py` holds what it leaves, file by file.
+    assert rc == 1
+    assert said.strip().startswith("NOT WRAPPED: no tool was admitted"), said
     assert harness["claude_json"].read_bytes() == before
+    assert not (harness["project"] / "tegh.lock").exists()
 
 
 def test_no_rewrite_admits_without_interposing(harness, capsys) -> None:

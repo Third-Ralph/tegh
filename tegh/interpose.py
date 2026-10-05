@@ -712,7 +712,7 @@ def plan_interposition(
     return plan
 
 
-def apply_interposition(
+def backup_of(
     plan: InterposePlan,
     *,
     wrapped_at: str,
@@ -720,11 +720,13 @@ def apply_interposition(
     harness: str,
     relocated: Optional[Mapping[str, str]] = None,
 ) -> WrapBackup:
-    """Displace every real server and install the gateway. Returns the backup.
+    """What a wrap is about to displace, read from every site and writing none.
 
-    The backup is built from a read of every site BEFORE the first write, so a
-    failure part-way through leaves a complete record of the original state
-    rather than a half-one.
+    The first half of an interposition, on its own so that a caller can put
+    the backup ON DISK before the first site is written (`tegh wrap` does). A
+    wrap that dies between the two then leaves a backup and an untouched
+    config, which `tegh unwrap` clears; the other order leaves a rewritten
+    config and no record of what it held.
 
     `relocated` maps a credential coordinate to the LEAF it now lives under;
     each such value is replaced in the backup by a reference, so the
@@ -750,7 +752,20 @@ def apply_interposition(
                 file_existed=document is not None,
             )
         )
+    return WrapBackup(
+        project=str(project),
+        harness=harness,
+        wrapped_at=wrapped_at,
+        sites=originals,
+        gateway_name=plan.gateway_name,
+        gateway_site=plan.gateway_site.label,
+    )
 
+
+def write_interposition(plan: InterposePlan) -> None:
+    """Displace every real server and install the gateway. The second half."""
+    if plan.gateway_site is None:
+        raise InterposeError("no gateway site — nothing to interpose into")
     for site in plan.sites:
         # The gateway's own site keeps exactly one entry; every other site is
         # emptied. Pruning an emptied key rather than leaving `{}` is what makes
@@ -760,14 +775,26 @@ def apply_interposition(
         else:
             _write_block(site, {}, prune_empty=True)
 
-    return WrapBackup(
-        project=str(project),
-        harness=harness,
-        wrapped_at=wrapped_at,
-        sites=originals,
-        gateway_name=plan.gateway_name,
-        gateway_site=plan.gateway_site.label,
+
+def apply_interposition(
+    plan: InterposePlan,
+    *,
+    wrapped_at: str,
+    project: Path,
+    harness: str,
+    relocated: Optional[Mapping[str, str]] = None,
+) -> WrapBackup:
+    """`backup_of` then `write_interposition`. Returns the backup.
+
+    The backup is built from a read of every site BEFORE the first write, so a
+    failure part-way through leaves a complete record of the original state
+    rather than a half-one. It is the caller's to store.
+    """
+    backup = backup_of(
+        plan, wrapped_at=wrapped_at, project=project, harness=harness, relocated=relocated
     )
+    write_interposition(plan)
+    return backup
 
 
 @dataclass(frozen=True)
