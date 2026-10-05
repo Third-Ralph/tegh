@@ -1,17 +1,20 @@
 """`tegh wrap` when it has to stop: what it says, and what it leaves behind.
 
-A way a wrap used to go wrong without saying so, checked against the bytes on
-disk and not against what the command printed:
+Two ways a wrap used to go wrong without saying so, each checked against the
+bytes on disk and not against what the command printed:
 
 1. **A second wrap of a wrapped project.** The project's only MCP server is by
    then tegh's own gateway, so the wrap reviewed that, was shown no tools, and
    replaced the signed lock with one pinning none. It now refuses before the
    review and names `tegh unwrap`.
+2. **A harness config tegh cannot read.** Not UTF-8, not readable, or not JSON:
+   one refusal naming the file, with or without `--accept-gaps`.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -26,11 +29,16 @@ from tegh.harnesses import claude_code  # noqa: E402
 from tegh.launch import gateway_argv  # noqa: E402
 from tegh.lockfile import lock_paths  # noqa: E402
 from tegh.tests.wrapping import (  # noqa: E402
+    NOT_UTF8_BYTE,
     TOY,
     fingerprint,
+    not_utf8,
     store_of,
+    truncate,
+    unreadable,
     unwrap_cli,
     wrap_admit_all,
+    wrap_argv,
     written_gateway_entry,
 )
 
@@ -338,3 +346,69 @@ def test_a_project_wrapped_by_0_1_1_is_recognised_and_unwrapped(harness, capsys)
     assert unwrap_cli(harness, "--yes") == 0
     assert harness["claude_json"].read_bytes() == before
     assert wrap_admit_all(harness) == 0, capsys.readouterr().err
+
+
+# ---------------------------------------------------------------------------
+# A harness config tegh cannot read
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("flags", [(), ("--accept-gaps",)], ids=["plain", "accept-gaps"])
+@pytest.mark.parametrize(
+    ("damage", "says"),
+    [
+        pytest.param(not_utf8, "is not UTF-8 text", id="not-utf8"),
+        pytest.param(unreadable, "Permission denied", id="unreadable"),
+        pytest.param(truncate, "is not valid JSON", id="truncated"),
+    ],
+)
+@pytest.mark.parametrize("which", ["claude_json", "project_mcp"])
+def test_a_config_tegh_cannot_read_is_a_refusal_naming_the_file(
+    harness, capsys, which: str, damage, says: str, flags
+) -> None:
+    if damage is unreadable and os.geteuid() == 0:
+        pytest.skip("root reads through a mode of 000")
+    assert main(["init"]) == 0
+    # A server at project scope, so there is something to wrap whichever file
+    # is damaged, and so the damaged `.mcp.json` is one that exists.
+    project_mcp = harness["project"] / ".mcp.json"
+    project_mcp.write_text(
+        json.dumps(
+            {"mcpServers": {"notes": {"command": sys.executable, "args": ["-m", TOY]}}},
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    path = {"claude_json": harness["claude_json"], "project_mcp": project_mcp}[which]
+    root = harness["home"].parent
+    mode = path.stat().st_mode
+    if damage is not unreadable:
+        damage(path)
+    before = fingerprint(root)
+    if damage is unreadable:
+        damage(path)
+    capsys.readouterr()
+
+    try:
+        # A traceback would be an exception here, and fail the test as one.
+        rc = main(wrap_argv(harness, "--admit-all", *flags))
+    finally:
+        path.chmod(mode)
+    captured = capsys.readouterr()
+
+    assert rc == 2
+    assert fingerprint(root) == before
+    refusal = captured.err.strip()
+    assert refusal.startswith("REFUSED: "), refusal
+    assert "REVIEW" not in captured.out
+    assert NOT_UTF8_BYTE not in (captured.out + captured.err).lower(), (
+        "a byte of the file was printed"
+    )
+    if flags:
+        # With the gaps waived the wrap reaches the read it cannot do without.
+        assert says in refusal
+        assert str(path) in refusal, "the refusal does not name the file"
+        assert len(refusal.splitlines()) == 1, refusal
+    else:
+        # Discovery's finding names the file, and the refusal points at it.
+        assert str(path) in captured.out

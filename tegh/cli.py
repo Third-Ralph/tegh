@@ -401,7 +401,12 @@ def _classify_config_values(
     blocks: dict[str, dict] = {}
     fields: list[LiteralField] = []
     for site in sites:
-        block = interpose.read_block(site)
+        try:
+            block = interpose.read_block(site)
+        except OSError as exc:
+            raise interpose.InterposeError(
+                unwrap.cannot_read(exc, needed_by="wrap")
+            ) from exc
         blocks[site.scope.value] = block
         fields.extend(configvalues.inventory(block, scope=site.scope.value))
 

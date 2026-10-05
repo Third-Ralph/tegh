@@ -26,7 +26,17 @@ import pytest
 
 from tegh import interpose, unwrap
 from tegh.store import TeghStore
-from tegh.tests.wrapping import files_holding, fingerprint, interposed, scripted, unwrap_cli
+from tegh.tests.wrapping import (
+    NOT_UTF8_BYTE,
+    files_holding,
+    fingerprint,
+    interposed,
+    not_utf8,
+    scripted,
+    truncate,
+    unreadable,
+    unwrap_cli,
+)
 
 _KEY_ONE = "not-a-real-credential-one"
 _KEY_TWO = "not-a-real-credential-two"
@@ -593,11 +603,6 @@ def test_a_credential_in_neither_place_sends_nobody_to_write_it_into_tegh(
 # ---------------------------------------------------------------------------
 
 
-def _truncate(path: Path) -> None:
-    raw = path.read_bytes()
-    path.write_bytes(raw[: len(raw) // 2])
-
-
 def _edit_backup(change):
     def _apply(path: Path) -> None:
         recorded = json.loads(path.read_text(encoding="utf-8"))
@@ -616,14 +621,10 @@ def _reference_without_a_leaf(recorded: dict) -> None:
     del reference[interpose.SECRET_REFERENCE_KEY]["leaf"]
 
 
-def _unreadable(path: Path) -> None:
-    path.chmod(0o000)
-
-
 @pytest.mark.parametrize(
     ("which", "damage", "says"),
     [
-        pytest.param("backup", _truncate, "is not valid JSON", id="truncated-backup"),
+        pytest.param("backup", truncate, "is not valid JSON", id="truncated-backup"),
         pytest.param("backup", lambda p: p.write_text("{}"), "has no 'project' key", id="empty-backup"),
         pytest.param("backup", lambda p: p.write_text("[]"), "the shape tegh writes", id="backup-is-a-list"),
         pytest.param("backup", _edit_backup(_unknown_scope), "'galactic'", id="unknown-scope"),
@@ -631,16 +632,17 @@ def _unreadable(path: Path) -> None:
             "backup", _edit_backup(_reference_without_a_leaf), "has no 'leaf' key",
             id="reference-without-a-leaf",
         ),
-        pytest.param("backup", _unreadable, "Permission denied", id="unreadable-backup"),
-        pytest.param("secrets", _unreadable, "Permission denied", id="unreadable-secrets"),
-        pytest.param("site", _unreadable, "Permission denied", id="unreadable-site"),
-        pytest.param("site", _truncate, "is not valid JSON", id="truncated-site"),
+        pytest.param("backup", unreadable, "Permission denied", id="unreadable-backup"),
+        pytest.param("secrets", unreadable, "Permission denied", id="unreadable-secrets"),
+        pytest.param("site", unreadable, "Permission denied", id="unreadable-site"),
+        pytest.param("site", truncate, "is not valid JSON", id="truncated-site"),
+        pytest.param("site", not_utf8, "is not UTF-8 text", id="non-utf8-site"),
     ],
 )
 def test_a_file_tegh_cannot_use_is_a_one_line_refusal(
     tmp_path, monkeypatch, capsys, which: str, damage, says: str
 ) -> None:
-    if damage is _unreadable and os.geteuid() == 0:
+    if damage is unreadable and os.geteuid() == 0:
         pytest.skip("root reads through a mode of 000")
     state = interposed(tmp_path, monkeypatch, local=_LEDGER)
     store, project = state["store"], state["project"]
@@ -651,7 +653,7 @@ def test_a_file_tegh_cannot_use_is_a_one_line_refusal(
     }[which]
     mode = path.stat().st_mode
     damage(path)
-    before = fingerprint(tmp_path) if damage is not _unreadable else None
+    before = fingerprint(tmp_path) if damage is not unreadable else None
 
     try:
         # A traceback would be an exception here, and fail the test as one.
@@ -666,6 +668,7 @@ def test_a_file_tegh_cannot_use_is_a_one_line_refusal(
     assert len(captured.err.strip().splitlines()) == 1, captured.err
     assert says in captured.err
     assert str(path) in captured.err, "the refusal does not name the file"
+    assert NOT_UTF8_BYTE not in captured.err.lower(), "the refusal quotes a byte of the file"
     _assert_no_value_printed(state, captured)
     if before is not None:
         assert fingerprint(tmp_path) == before
@@ -675,6 +678,6 @@ def test_a_file_tegh_cannot_use_is_a_one_line_refusal(
 def test_the_question_is_not_asked_when_the_plan_cannot_be_made(tmp_path, monkeypatch, capsys) -> None:
     """A refusal comes before the question, so nobody agrees to nothing."""
     state = interposed(tmp_path, monkeypatch, local=_LEDGER)
-    _truncate(state["store"].backup_path(state["project"]))
+    truncate(state["store"].backup_path(state["project"]))
 
     assert unwrap_cli(state, prompt=scripted([])) == unwrap.EXIT_REFUSED

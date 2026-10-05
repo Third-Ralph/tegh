@@ -61,6 +61,15 @@ def wrap_admit_all(harness: dict, *flags: str) -> int:
     )
 
 
+def wrap_argv(harness: dict, *flags: str) -> list[str]:
+    return [
+        "wrap", "claude",
+        "--project", str(harness["project"]),
+        "--harness-home", str(harness["home"]),
+        *flags,
+    ]
+
+
 def scripted(answers: list[str]):
     """A review prompt that replays a fixed script, and says so when it runs dry.
 
@@ -181,6 +190,25 @@ def fingerprint(root: Path) -> dict[str, str]:
         for path in sorted(root.rglob("*"))
         if path.is_file()
     }
+
+
+def not_utf8(path: Path) -> None:
+    """Make `path` a file no UTF-8 reader can decode, whatever it held."""
+    path.write_bytes(b'{"mcpServers": {"caf\xe9": {"command": "\xff\xfe"}}}')
+
+
+#: The first byte of `not_utf8` that does not decode, as Python's own error
+#: spells it. A refusal must not: a byte of a config can be a byte of a credential.
+NOT_UTF8_BYTE = "0xe9"
+
+
+def truncate(path: Path) -> None:
+    raw = path.read_bytes()
+    path.write_bytes(raw[: len(raw) // 2])
+
+
+def unreadable(path: Path) -> None:
+    path.chmod(0o000)
 
 
 def unwrap_cli(state: dict, *flags: str, prompt=None) -> int:

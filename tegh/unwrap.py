@@ -592,6 +592,17 @@ def apply_plan(store: TeghStore, plan: UnwrapPlan) -> int:
     return EXIT_OK
 
 
+def cannot_read(exc: OSError, *, needed_by: str) -> str:
+    """What to say when a file could not be read before anything was written.
+
+    The file's name and the system's reason. Never `str(exc)` of something that
+    could carry contents. `tegh wrap` says the same sentence for the same
+    failure, so it is here for both.
+    """
+    where = f" {exc.filename}" if exc.filename else f" a file this {needed_by} needs"
+    return f"tegh cannot read{where} ({exc.strerror}). Nothing was changed."
+
+
 def run(
     store: TeghStore, project: Path, *, yes: bool, prompt: Optional[Prompt] = None
 ) -> int:
@@ -606,13 +617,7 @@ def run(
         print(f"REFUSED: {exc}", file=sys.stderr)
         return EXIT_REFUSED
     except OSError as exc:
-        # The file's name and the system's reason. Never `str(exc)` of
-        # something that could carry contents.
-        where = f" {exc.filename}" if exc.filename else " a file this unwrap needs"
-        print(
-            f"REFUSED: tegh cannot read{where} ({exc.strerror}). Nothing was changed.",
-            file=sys.stderr,
-        )
+        print(f"REFUSED: {cannot_read(exc, needed_by='unwrap')}", file=sys.stderr)
         return EXIT_REFUSED
     print(render_plan(plan))
     if not yes and not confirm(QUESTION, prompt=prompt):
