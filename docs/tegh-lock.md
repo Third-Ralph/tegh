@@ -36,7 +36,7 @@ So, locally:
 | Role | Cloud | tegh (local) |
 |---|---|---|
 | Key #1 — namespace + ToolOp declaration | image-baked `AgentManifest` | tegh's own store directory, **outside the project tree** |
-| Key #2 — activation row | DynamoDB registry row, ceremony-written | sqlite registry row, ceremony-written |
+| Key #2 — activation row | DynamoDB registry row, ceremony-written | sqlite registry row, ceremony-written, in a database of the project's own |
 | Committed record | (none) | **`tegh.lock`** — this document |
 
 Posture-1 honesty applies and is stated in `tegh posture` (shipped 2026-07-26): a same-user attacker
