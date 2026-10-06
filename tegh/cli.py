@@ -2589,6 +2589,13 @@ def main(argv: Optional[list[str]] = None) -> int:
         if args.command == "posture":
             return posture_command(args)
         return diff_command(args)
+    except KeyboardInterrupt:
+        # Ctrl-C outside a wrap's or an unwrap's own span, each of which says
+        # what it put back. Here nothing is known to need putting back, and a
+        # traceback would tell the person who pressed the key nothing.
+        sys.stdout.flush()
+        print(f"\nINTERRUPTED: tegh {args.command} was stopped.", file=sys.stderr)
+        return unwrap.EXIT_INTERRUPTED
     except TeghStoreError as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 2

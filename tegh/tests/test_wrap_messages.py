@@ -1,10 +1,11 @@
 """What `tegh wrap` prints is followed word for word, so it has to work that way.
 
-Two things a message can get wrong without any file being wrong:
+Three things a message can get wrong without any file being wrong:
 
 - a command it names leaves out the tegh home the wrap was given, so the
   command looks somewhere else and refuses;
-- a ceremony's failure arrives as a Python traceback folded into a sentence.
+- a ceremony's failure arrives as a Python traceback folded into a sentence;
+- a Ctrl-C outside a wrap's own span arrives as a traceback of tegh's.
 
 Each is driven through the real command, and each printed command is run.
 """
@@ -20,6 +21,7 @@ import pytest
 
 pytest.importorskip("mcp", reason="a real wrap snapshots a real MCP server")
 
+from tegh import cli  # noqa: E402
 from tegh.cli import _parse_args, main, wrap_command  # noqa: E402
 from tegh.lockfile import lock_paths  # noqa: E402
 from tegh.tests.wrapping import TOY, scripted, store_of, wrap_argv  # noqa: E402
@@ -167,6 +169,51 @@ def test_a_process_that_could_not_be_stopped_is_named_in_the_one_line(
         "tegh could not stop every process this wrap started, and these may still "
         "be running: pid 4242, 4243." in failure
     )
+
+
+# ---------------------------------------------------------------------------
+# Ctrl-C outside a wrap's span
+# ---------------------------------------------------------------------------
+
+_COMMANDS = {
+    "init": (cli, "init_command", ["init"]),
+    "wrap": (cli, "wrap_command", ["wrap", "claude"]),
+    "gateway": (cli, "gateway_command", ["gateway"]),
+    "call": (None, "call_command", ["call", "ledger__get_entry"]),
+    "approve": (cli, "approve_command", ["approve", "intent-0"]),
+    "audit": (cli, "audit_command", ["audit"]),
+    "unwrap": (cli, "unwrap_command", ["unwrap"]),
+    "status": (cli, "status_command", ["status"]),
+    "posture": (cli, "posture_command", ["posture"]),
+    "diff": (cli, "diff_command", ["diff"]),
+}
+
+
+@pytest.mark.parametrize("command", sorted(_COMMANDS))
+def test_ctrl_c_in_any_command_is_one_line_and_the_interrupted_status(
+    command: str, capsys, monkeypatch
+) -> None:
+    """Wherever it lands outside a wrap's or an unwrap's own handling.
+
+    Each command is replaced by the KeyboardInterrupt it would raise from
+    wherever it happened to be, so this holds `main` to the rule and says
+    nothing about any one command.
+    """
+    module, name, argv = _COMMANDS[command]
+    if module is None:
+        from tegh import call as module  # noqa: PLC0415 - `main` imports it late too
+
+    def _interrupted(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(module, name, _interrupted)
+
+    status = main(argv)
+
+    said = capsys.readouterr()
+    assert status == 130
+    assert said.err == f"\nINTERRUPTED: tegh {command} was stopped.\n"
+    assert said.out == ""
 
 
 # ---------------------------------------------------------------------------
