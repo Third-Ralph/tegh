@@ -174,9 +174,15 @@ time.sleep(120)
 
 
 def processes_naming(*needles: object) -> list[str]:
-    """Every running process whose command line names one of `needles`."""
+    """Every running process whose command line names one of `needles`.
+
+    `ww` because `ps` on Linux can cut each line at 80 columns when it has no terminal
+    to measure, and a needle is usually a temporary path at the end of the
+    command. Cut off, it matches nothing, and every caller that asserts no
+    process is left would pass without having looked.
+    """
     listed = subprocess.run(  # noqa: S603, S607 - fixed argv, no shell
-        ["ps", "-axo", "pid=,command="], capture_output=True, text=True, check=True
+        ["ps", "-axwwo", "pid=,command="], capture_output=True, text=True, check=True
     ).stdout
     return [
         line.strip()
