@@ -1439,9 +1439,15 @@ def _report_part_admitted(
     Nothing is put back from here: the admissions already ratified cannot be,
     and the files beside them are what makes them safe. So the line says what
     is true now. The project is wrapped. Each tool is either admitted and
-    served or it is not callable, by name. And there is one way on, which
+    served or it is not served, by name. And there is one way on, which
     works from every such state: unwrap, then wrap again. Under `--no-rewrite`
     there is nothing to unwrap, and it is the wrap alone.
+
+    "Not served" is said as what a call gets, and that is not always a
+    refusal. The broker holds a write for approval before the connector is
+    asked whether the manifest names the tool, so a call to a tool confirmed
+    as a held write answers "held for approval"; the refusal comes when that
+    call is approved. Either way it does not execute.
     """
     stopped = _as_stopped(stopped_by)
     why = re.sub(r"\s*\n\s*", " ", stopped.why.strip()).rstrip(".")
@@ -1464,9 +1470,11 @@ def _report_part_admitted(
     _say(
         f"\n{stopped.label}: {why}, after the point where a wrap can still be put "
         f"back. {state}, but only {len(progress.served)} of {len(progress.proposed)} "
-        f"tool(s) were admitted. Admitted and served: {served}. NOT admitted, and "
-        f"refused if called: {waiting}. This wrap serves no tool you did not "
-        "review, and the tegh.lock it wrote pins the definition of each one it serves."
+        f"tool(s) were admitted. Admitted and served: {served}. NOT admitted and "
+        "not served, so a call to one does not execute (it is refused, or held "
+        f"for approval and refused when approved): {waiting}. This wrap serves no "
+        "tool you did not review, and the tegh.lock it wrote pins the definition "
+        "of each one it serves."
         f"{_withdrawn(progress)}{_left_running(transaction)} {finish}"
     )
     return stopped.status

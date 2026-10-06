@@ -242,7 +242,9 @@ and its manifest names a tool only once that tool's admission is ratified. None 
 taken back, so a wrap that stops there is not rolled back. It ends `FAILED` or `INTERRUPTED` with
 one line that says the project is wrapped, names the tools that were admitted and the ones that
 were not, and gives the commands to run: `tegh unwrap` to undo it, and then `tegh wrap` again to
-finish. A tool that was not admitted is refused if it is called.
+finish. A tool that was not admitted is not served, so a call to it does not execute: it is
+refused, or, for a tool you confirmed as a write the broker holds, held for approval and refused
+when you approve it.
 
 The order of those writes is what covers the stop nothing can report, a `kill -9` or a power cut.
 At every point in a wrap of this project, a call for it executes only what it executed before the
