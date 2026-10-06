@@ -6,7 +6,7 @@ This is where key #1 and key #2 of two-key admission live on a laptop:
 Role                         Cloud                                  tegh (local)
 ===========================  =====================================  ============
 key #1 namespace + ToolOp    image-baked ``AgentManifest``          ``<home>/projects/<slug>/manifest.yaml``
-key #2 activation row        DynamoDB registry row                  ``<home>/tegh.db`` (sqlite)
+key #2 activation row        DynamoDB registry row                  ``<home>/projects/<slug>/store.db`` (sqlite)
 committed record             (none)                                 ``tegh.lock`` in the PROJECT tree
 ===========================  =====================================  ============
 
@@ -16,6 +16,24 @@ vendor-side — tegh cannot add a file to it. A manifest or database living ther
 would be editable by an injected agent with no prompt, collapsing both keys at
 once. Putting them under a separate home is what makes the lock a *projection*
 (TL1) rather than the authority.
+
+**One database per project, beside that project's manifest.** The base keys
+an admitted tool by server name and tool name and by nothing else, so one
+database is one namespace of server names. Two projects that each configure a
+server called `github` are two reviews of two definitions, and in a database
+they shared the second admission would replace the first, leaving the first
+project's signed lock pinning a definition the gateway no longer serves.
+Everything else the base keeps on the sqlite arm goes to the same file (the
+admission proposals and records, the grants and their ledger, held calls,
+budget counters), because tegh names one path and the base places all of it
+there; see :meth:`TeghStore.db_path`.
+
+**The earlier layout is cut off, never migrated.** A tegh before this one kept
+a single ``<home>/tegh.db`` for every project. A row in that file cannot say
+which project's review produced it, so no row is copied out of it and nothing
+in it is authority: tegh does not open that file, write it, move it or remove
+it. A project wrapped under that layout is refused in words until it is
+wrapped again; ``## The layout marker`` below is how one is told apart.
 
 **Posture-1 honesty, restated because it is easy to overclaim.** This defeats the
 *ordinary* injected-agent edit — an agent following instructions in a poisoned
@@ -44,6 +62,25 @@ tegh's internal layout, not part of the frozen lock format, and nothing in
 `tegh.lock` records where a secret lives — so the resolution stays changeable
 store-side.
 
+## The layout marker
+
+``<home>/projects/<slug>/layout`` holds the number of the layout a project's
+manifest was written for. This tegh writes and reads ``2``, one database per
+project. A wrap writes the marker straight after it first writes the manifest
+and records both to be put back together, so a wrap that is rolled back leaves
+an earlier wrap's manifest without one, exactly as it found it. A wrap killed
+outright between the two writes leaves its own manifest without one. That
+manifest names no tool, and it is refused like an earlier one until the next
+wrap, which is what the refusal says to run.
+
+A manifest with no marker is therefore one an earlier tegh wrote, and
+:meth:`TeghStore.layout_refusal` is the refusal for it. Both environment
+builders ask before they name a database, which is what keeps any command
+from opening a new, empty one for such a project and serving from it in
+silence. The marker authorises nothing. With one forged beside an earlier
+manifest the gateway would start on a per-project database that holds no
+admission and no grant, and refuse every call.
+
 What a relocated credential is NAMED, as opposed to where it sits, is settled:
 a manifest names a bare LEAF by ruling, and the deploying topology supplies
 the scope (`docs/config-provenance.md` § "Secret naming — the leaf rule").
@@ -58,10 +95,11 @@ import json
 import os
 import re
 import secrets
+import shlex
 import stat
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Collection, Mapping
+from typing import Collection, Mapping, Optional
 
 from tegh.launch import BROKER_INHERITED_ENV_VARS, inherited_env
 
@@ -69,7 +107,14 @@ from tegh.launch import BROKER_INHERITED_ENV_VARS, inherited_env
 #: second, isolated tegh (a test, a second identity) is one env var away.
 TEGH_HOME_ENV = "TEGH_HOME"
 
-_DB_NAME = "tegh.db"
+_DB_NAME = "store.db"
+#: The one database an earlier tegh kept for every project of a home. Named so
+#: a refusal can say where it is. Nothing here opens it.
+_SHARED_DB_NAME = "tegh.db"
+_LAYOUT_NAME = "layout"
+#: The layout this tegh writes and reads: one store database per project.
+#: Layout 1 was the shared database, and wrote no marker.
+STORE_LAYOUT = "2"
 _HMAC_NAME = "hmac.key"
 _ISSUER_KEY_NAME = "issuer.pem"
 _ISSUER_PUB_NAME = "issuer.pub"
@@ -108,9 +153,111 @@ class TeghStore:
 
     home: Path
 
+    def db_path(self, project: Path | str) -> Path:
+        """Key #2 for one project, and the rest of what the base stores for it.
+
+        **Per-project, not per-home**, for the reason `secrets_path` is: the
+        base's key for an admitted tool is the server name and the tool name,
+        which two projects are free to share, and in one file the later
+        admission replaces the earlier. This is the only database path tegh
+        names. The base puts its grant space in the same file unless told
+        otherwise, and tegh never tells it otherwise (`gateway_env`), so a
+        project's grants, ledger records, held calls and counters are in this
+        file with its admissions and in no other project's.
+
+        Created by the base on the first ceremony that writes to it.
+        """
+        return self.project_dir(project) / _DB_NAME
+
     @property
-    def db_path(self) -> Path:
-        return self.home / _DB_NAME
+    def shared_db_path(self) -> Path:
+        """Where an earlier tegh kept every project's rows. Never opened.
+
+        Here so a refusal can say where the file is. No environment tegh
+        builds names it, and nothing reads, writes, moves or removes it.
+        """
+        return self.home / _SHARED_DB_NAME
+
+    def layout_path(self, project: Path | str) -> Path:
+        """The marker beside one project's manifest. See the module docstring."""
+        return self.project_dir(project) / _LAYOUT_NAME
+
+    def mark_layout(self, project: Path | str) -> None:
+        """Record that this project's manifest was written for this layout."""
+        path = self.layout_path(project)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(STORE_LAYOUT + "\n", encoding="utf-8")
+
+    def layout_refusal(self, project: Path | str) -> Optional[str]:
+        """Why nothing is served for this project, or None when something can be.
+
+        None for a project with no manifest, which is not wrapped at all and is
+        each command's own refusal to make, and for one whose marker names this
+        layout. A manifest with no marker was written by an earlier tegh, whose
+        admissions are in a database this one does not read; the message says
+        so and names the commands that admit the project's tools again. Which
+        commands depends on whether that wrap rewrote the harness config: an
+        unwrap restores from the wrap backup and refuses without one.
+        """
+        if not self.manifest_path(project).exists():
+            return None
+        marker = self.layout_path(project)
+        try:
+            found = marker.read_bytes().strip()
+        except FileNotFoundError:
+            found = None
+        except OSError as exc:
+            raise TeghStoreError(
+                f"{marker} could not be read ({exc.strerror}), so tegh cannot tell "
+                "which store layout this project was wrapped under."
+            ) from exc
+        if found == STORE_LAYOUT.encode("ascii"):
+            return None
+        where = self.named_as(project)
+        if found is not None:
+            return (
+                f"{marker} gives this project's store layout as "
+                f"{found.decode('utf-8', 'replace')!r}, and this tegh reads and "
+                f"writes {STORE_LAYOUT!r}. The file was written by a different "
+                "version of tegh or changed by hand, and tegh serves nothing for "
+                "the project on a guess at which. Use the tegh that wrapped it, or "
+                f"run `tegh unwrap {where}` and then `tegh wrap claude {where}`."
+            )
+        if self.backup_path(project).exists():
+            way_out = (
+                f"Run `tegh unwrap {where}` to put your own servers back, and "
+                f"then `tegh wrap claude {where}` to review and admit them again."
+            )
+        else:
+            way_out = (
+                "That wrap left no backup, so `tegh unwrap` has nothing to "
+                f"restore: run `tegh wrap claude {where}` to review and admit "
+                "its tools again."
+            )
+        return (
+            f"{project} was wrapped by an earlier version of tegh, which kept one "
+            f"store database for every project ({self.shared_db_path}). This "
+            "version keeps one per project and does not read that file, because "
+            "a row in it cannot say which project's review admitted it. Nothing "
+            "admitted for this project was carried over, so no tool of it is "
+            f"served. {way_out} The earlier database is left exactly as it is."
+        )
+
+    def named_as(self, project: Path | str) -> str:
+        """The flags that name this project and this home to any tegh command.
+
+        Quoted for a shell, so a command a message names can be pasted as it
+        stands. Both are always given: the reader of a refusal may be in
+        another directory and under another `$TEGH_HOME` than the command that
+        printed it.
+        """
+        return f"--project {shlex.quote(str(project))} --home {shlex.quote(str(self.home))}"
+
+    def require_layout(self, project: Path | str) -> None:
+        """Raise `layout_refusal` when there is one."""
+        refusal = self.layout_refusal(project)
+        if refusal is not None:
+            raise TeghStoreError(refusal)
 
     @property
     def hmac_key_path(self) -> Path:
@@ -397,12 +544,18 @@ class TeghStore:
         `ISSUER_SIGNING_KEY_SECRET_ARN` out: it would collide with the file arm,
         and the base refuses when both are set — correctly, since picking one
         silently would attribute records to a key the operator did not mean.
+
+        Refuses a project wrapped under the earlier store layout
+        (`layout_refusal`) before it names anything: the first ceremony to run
+        would create this project's database, empty, beside a manifest that
+        was written against another one.
         """
+        self.require_layout(project)
         environment = inherited_env(BROKER_INHERITED_ENV_VARS)
         environment.update(
             {
                 "BROKER_STORE": "sqlite",
-                "BROKER_SQLITE_PATH": str(self.db_path),
+                "BROKER_SQLITE_PATH": str(self.db_path(project)),
                 "BROKER_HMAC_KEY": self.hmac_key(),
                 "BROKER_LOCAL_IDENTITY": role,
                 "ISSUER_SIGNING_KEY_FILE": str(self.issuer_key_path),
@@ -444,15 +597,23 @@ class TeghStore:
         that showed it was `BROKER_SQLITE_GRANTS_PATH`, which the base reads at
         boot and tegh never names: inherited, it pointed the gateway at a grants
         database the wrap had not written, and every admitted call was refused
-        as not granted. `BROKER_AUDIT_BUCKET`, `BROKER_ENVELOPE_LOAD` and
+        as not granted. Unnamed, the base keeps the grant space in the database
+        `BROKER_SQLITE_PATH` names, which is this project's own.
+        `BROKER_AUDIT_BUCKET`, `BROKER_ENVELOPE_LOAD` and
         `BROKER_LOCAL_IDENTITY` stay out the same way; each selects an arm this
         gateway does not run.
+
+        Refuses a project wrapped under the earlier store layout
+        (`layout_refusal`), as `ceremony_env` does. A gateway started for one
+        would open a new database with no admission in it and answer every
+        call as if the tool had never been admitted.
         """
+        self.require_layout(project)
         environment = inherited_env(BROKER_INHERITED_ENV_VARS)
         environment.update(
             {
                 "BROKER_STORE": "sqlite",
-                "BROKER_SQLITE_PATH": str(self.db_path),
+                "BROKER_SQLITE_PATH": str(self.db_path(project)),
                 "BROKER_HMAC_KEY": self.hmac_key(),
                 "BROKER_MANIFEST": str(self.manifest_path(project)),
                 "BROKER_GRANT_LOAD": "read",
@@ -495,8 +656,8 @@ def provision(home: Path | None = None) -> TeghStore:
     """Mint this tegh home's secrets. Idempotent only in that it refuses twice.
 
     Generates a fresh HMAC key and a fresh Ed25519 issuer signing key, both at
-    0600, and creates nothing else — the sqlite database is created by the
-    store on first use, and a project's manifest is written at wrap time.
+    0600, and creates nothing else — each project's sqlite database is created
+    by the base on first use, and its manifest is written at wrap time.
     """
     from cryptography.hazmat.primitives import serialization  # noqa: PLC0415
     from cryptography.hazmat.primitives.asymmetric import ed25519  # noqa: PLC0415

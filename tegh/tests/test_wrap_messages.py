@@ -124,7 +124,7 @@ def test_a_ceremony_that_crashes_is_one_line_and_its_traceback_is_shown_apart(
     """
     assert main(["init"]) == 0
     assert main(wrap_argv(harness, "--admit-all", "--no-rewrite")) == 0
-    database = store_of(harness).db_path
+    database = store_of(harness).db_path(harness["project"])
     database.chmod(0o444)
     capsys.readouterr()
     try:

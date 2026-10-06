@@ -90,6 +90,11 @@ class UnwrapPlan:
     audit_path: Path
     sites: list[SiteRestore]
     credentials: list[RelocatedReference]
+    #: The wrap command to run next, for a project tegh serves nothing for
+    #: (`TeghStore.layout_refusal`); None for one it serves. Such a project's
+    #: admissions are in a database this tegh does not read, so the plan and
+    #: the report must not say they carry over to the next wrap.
+    wrap_again: Optional[str] = None
 
     @property
     def already_back(self) -> list[RelocatedReference]:
@@ -292,6 +297,11 @@ def build_plan(store: TeghStore, project: Path) -> UnwrapPlan:
         audit_path=store.audit_path(project),
         sites=sites,
         credentials=interpose.relocated_references(backup),
+        wrap_again=(
+            None
+            if store.layout_refusal(project) is None
+            else f"tegh wrap claude {store.named_as(project)}"
+        ),
     )
 
 
@@ -338,8 +348,7 @@ def render_plan(plan: UnwrapPlan) -> str:
             *(line for note in already_back for line in (note, "")),
             "It leaves untouched:",
             "",
-            "  tegh.lock and the admitted rows, so re-wrapping does not re-run "
-            "the ceremony",
+            _KEPT_UNREAD if plan.wrap_again else _KEPT,
             f"  the audit tape at {plan.audit_path}",
             "",
             QUIT_THE_AGENT,
@@ -362,9 +371,35 @@ def render_report(plan: UnwrapPlan) -> str:
             "",
             f"unwrapped {plan.project} (wrapped {plan.backup.wrapped_at}). The "
             f"harness reaches its original servers directly again.{moved} "
-            "tegh.lock, the admitted rows and the audit tape are untouched, so "
-            "re-wrapping does not re-run the ceremony.",
+            + _left_as_it_was(plan),
         ]
+    )
+
+
+#: What an unwrap leaves of the admissions. It says what is on disk and makes
+#: no promise about the next wrap, which reviews its tools whatever is here.
+_KEPT = "  tegh.lock and the admitted rows"
+_KEPT_UNREAD = (
+    "  tegh.lock, and what this project's wrap admitted, which is in a store "
+    "database this tegh does not read"
+)
+
+
+def _left_as_it_was(plan: UnwrapPlan) -> str:
+    """The report's last sentence: what was not changed, and what follows from it.
+
+    For a project tegh serves nothing for, what follows is the opposite of
+    "nothing to redo": its admissions are not read, so the next wrap reviews
+    and admits every tool, and the report names that command because the
+    refusal that sent the developer here named this one first.
+    """
+    if plan.wrap_again is None:
+        return "tegh.lock, the admitted rows and the audit tape are untouched."
+    return (
+        "tegh.lock and the audit tape are untouched. What this project's wrap "
+        "admitted is in a store database this tegh does not read, so nothing "
+        f"is carried over: run `{plan.wrap_again}` to review and admit its "
+        "tools again."
     )
 
 

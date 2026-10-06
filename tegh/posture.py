@@ -582,25 +582,43 @@ _EVALUATOR_VERIFY_KEYS_FILE_ENV = "EVALUATOR_VERIFY_KEYS_FILE"
 _AUDIT_VERIFY_KEYS_ENV = (_ISSUER_VERIFY_KEYS_FILE_ENV, _EVALUATOR_VERIFY_KEYS_FILE_ENV)
 
 
-def _audit_lines(store: TeghStore, *, runner=None) -> list[PostureLine]:
-    """Run the base's store audit against this tegh home's database.
+def _audit_lines(store: TeghStore, project: Path, *, runner=None) -> list[PostureLine]:
+    """Run the base's store audit against this project's database.
 
     One command, one read of the file, two things audited: the grants and the
     MCP admitted-tool registry. They are reported apart here because they are
     different facts to a tegh user, whose admissions live in the registry.
+
+    The database is the project's own (`TeghStore.db_path`), so the counts are
+    this project's and say nothing about another one under the same home. A
+    project wrapped under the earlier layout, whose admissions are in a
+    database tegh does not read, is reported as that and nothing is audited.
 
     Shelled out rather than imported, for the same reason the ceremony is
     (`cli.py`): tegh may import `safe_agents.broker.schemas` and the gateway
     client from `safe_agents.broker.api`, and neither of those audits a store.
     The `--json` contract is what makes that a contract rather than a scrape.
     """
-    if not store.db_path.exists():
+    earlier_layout = store.layout_refusal(project)
+    if earlier_layout is not None:
+        return [
+            PostureLine(
+                claim="Nothing is served for this project: its wrap is not one this "
+                "tegh reads admissions for",
+                holds="no",
+                source=f"{store.manifest_path(project)}; {store.layout_path(project)}",
+                detail=earlier_layout,
+            )
+        ]
+
+    database = store.db_path(project)
+    if not database.exists():
         return [
             PostureLine(
                 claim="No local store database exists yet",
                 holds="unknown",
-                source=f"{store.db_path} does not exist",
-                detail="it is created by the first admission; nothing has been admitted",
+                source=f"{database} does not exist",
+                detail="it is created by the project's first wrap; nothing has been admitted",
             )
         ]
 
@@ -610,7 +628,7 @@ def _audit_lines(store: TeghStore, *, runner=None) -> list[PostureLine]:
     # would be a second arm of the same resolution. The identity it also sets is
     # inert for a read-only command; the audit writes nothing.
     try:
-        env = store.ceremony_env(role="checker", project=".")
+        env = store.ceremony_env(role="checker", project=project)
         env.update(inherited_env(_AUDIT_VERIFY_KEYS_ENV))
     except TeghStoreError as exc:
         return [
@@ -624,7 +642,7 @@ def _audit_lines(store: TeghStore, *, runner=None) -> list[PostureLine]:
 
     run = runner or _run_audit
     try:
-        completed = run(env, str(store.db_path))
+        completed = run(env, str(database))
     except OSError as exc:  # pragma: no cover - environment-dependent
         return [
             PostureLine(
@@ -658,7 +676,7 @@ def _audit_lines(store: TeghStore, *, runner=None) -> list[PostureLine]:
             )
         ]
 
-    lines = [_integrity_line(payload, store)]
+    lines = [_integrity_line(payload, database)]
     if payload["skipped_rules"]:
         lines.append(
             PostureLine(
@@ -675,7 +693,7 @@ def _audit_lines(store: TeghStore, *, runner=None) -> list[PostureLine]:
     return lines
 
 
-def _integrity_line(payload: dict, store: TeghStore) -> PostureLine:
+def _integrity_line(payload: dict, database: Path) -> PostureLine:
     """The audit's verdict, with grant findings and registry findings kept apart.
 
     The base returns both in one `violations` list. Counting that list under a
@@ -697,7 +715,7 @@ def _integrity_line(payload: dict, store: TeghStore) -> PostureLine:
     registry_rows = examined.get("mcp_rows")
     grants_clause = f"{grant_findings} grant violation(s) over {examined['grants']} grant(s)"
     fired = ", ".join(sorted({found["rule"] for found in violations}))
-    source = f"python -m safe_agents.broker.grants.audit_command --sqlite {store.db_path}"
+    source = f"python -m safe_agents.broker.grants.audit_command --sqlite {database}"
 
     if registry_rows is None:
         return PostureLine(
@@ -806,7 +824,7 @@ def build_report(
         project=tuple(
             [durability_line(harness), *_project_lines(project, store, lock_reader)]
         ),
-        store=tuple(_audit_lines(store, runner=audit_runner)),
+        store=tuple(_audit_lines(store, project, runner=audit_runner)),
         cluster=cluster,
     )
 

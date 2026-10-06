@@ -75,7 +75,7 @@ def test_wrap_interposes_the_gateway_and_unwrap_restores_it(harness, capsys) -> 
 
     # --- the lock is a projection; the authority is outside the project ------
     assert (harness["project"] / "tegh.lock").exists()
-    assert (harness["tegh_home"] / "tegh.db").exists()
+    assert _store(harness).db_path(harness["project"]).exists()
 
     # --- unwrap restores byte-for-byte ---------------------------------------
     assert main(["unwrap", "--yes", "--project", str(harness["project"])]) == 0

@@ -121,10 +121,12 @@ def _parse_arguments(raw: str) -> dict[str, Any]:
 def _wrapped_store(args: argparse.Namespace) -> tuple[Path, TeghStore]:
     """Resolve the project and its store exactly as `gateway` does, or refuse.
 
-    The same two checks `gateway_command` makes, made here FIRST. The spawned
-    gateway would refuse on both by itself, but its refusal would arrive as a
+    The same checks `gateway_command` makes, made here FIRST. The spawned
+    gateway would refuse on each by itself, but its refusal would arrive as a
     child that exited during the handshake, wrapped in a client error about a
-    missing reply. Saying it here says it plainly and spawns nothing.
+    missing reply. Saying it here says it plainly and spawns nothing. The last
+    is the project wrapped under an earlier store layout, which
+    `TeghStore.gateway_env` refuses for the gateway.
     """
     project = Path(args.project).expanduser().resolve()
     store = TeghStore(home=Path(args.home).expanduser() if args.home else tegh_home())
@@ -136,6 +138,9 @@ def _wrapped_store(args: argparse.Namespace) -> tuple[Path, TeghStore]:
             f"{project} has not been wrapped, so there is no gateway to call "
             f"(no manifest at {manifest}). Run `tegh wrap claude --project <path>` first."
         )
+    earlier_layout = store.layout_refusal(project)
+    if earlier_layout is not None:
+        raise _CannotAsk(earlier_layout)
     return project, store
 
 

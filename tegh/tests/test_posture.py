@@ -274,6 +274,13 @@ def test_an_unresearched_harness_gets_no_durability_claim():
 # ---------------------------------------------------------------------------
 
 
+def _empty_database(project, store) -> None:
+    """A file where this project's database goes, for an audit a test fakes."""
+    database = store.db_path(project)
+    database.parent.mkdir(parents=True, exist_ok=True)
+    database.write_text("")
+
+
 def _fake_audit(returncode: int, stdout: str = "", stderr: str = ""):
     def run(env, db_path):
         return subprocess.CompletedProcess(
@@ -331,7 +338,7 @@ def test_no_database_reports_unknown_not_clean(project, store):
 def test_audit_that_could_not_run_reports_unknown(project, store):
     """Exit 2 from the audit means nobody looked. Rounding that to clean is the
     failure the audit's own exit-code contract exists to prevent."""
-    store.db_path.write_text("")
+    _empty_database(project, store)
     report = _report(project, store, audit_runner=_fake_audit(2, stderr="no key"))
 
     assert report.store[0].holds == "unknown"
@@ -339,7 +346,7 @@ def test_audit_that_could_not_run_reports_unknown(project, store):
 
 
 def test_skipped_rules_are_reported_as_partial_not_passed(project, store):
-    store.db_path.write_text("")
+    _empty_database(project, store)
     report = _report(project, store, audit_runner=_fake_audit(0, _clean_payload()))
 
     skipped = [line for line in report.store if line.holds == "partial"]
@@ -360,7 +367,7 @@ def test_a_clean_grants_result_does_not_imply_the_registry_is_audited(
     """The trap this line exists for: tegh's admissions live in the MCP registry,
     so a clean grants result says nothing about the rows tegh's trust rests on
     unless the run covered them. Not audited is never zero rows and never green."""
-    store.db_path.write_text("")
+    _empty_database(project, store)
     payload = _payload(grants=0, registry=registry)
     report = _report(project, store, audit_runner=_fake_audit(0, payload))
 
@@ -386,7 +393,7 @@ def test_registry_findings_are_not_reported_as_grant_findings(
     """The base returns grant and registry findings in ONE list. Counting that
     list under a grants label reports a tampered registry row as a grant
     violation, which sends the reader to the wrong rows."""
-    store.db_path.write_text("")
+    _empty_database(project, store)
     payload = _payload(grants=2, registry=_REGISTRY_EXAMINED, violations=violations)
     report = _report(project, store, audit_runner=_fake_audit(1 if violations else 0, payload))
 
@@ -426,7 +433,7 @@ def test_a_verify_keys_file_named_in_the_shell_reaches_the_audit_alone(
     shell (#5), so the audit carries these two names itself; if it stopped, that
     line would be advice nobody could follow. No ceremony leg gets them."""
     monkeypatch.setenv(name, "/somewhere/verify-keys.json")
-    store.db_path.write_text("")
+    _empty_database(project, store)
     handed_over: list[dict] = []
 
     def run(env, db_path):
@@ -438,6 +445,58 @@ def test_a_verify_keys_file_named_in_the_shell_reaches_the_audit_alone(
     (env,) = handed_over
     assert env[name] == "/somewhere/verify-keys.json"
     assert name not in store.ceremony_env(role="checker", project=project)
+
+
+def _never_wrapped(store, elsewhere) -> list[str]:
+    return []
+
+
+def _of_the_earlier_layout(store, elsewhere) -> list[str]:
+    """A manifest with no layout marker: what a tegh with one database per home left."""
+    store.manifest_path(elsewhere).parent.mkdir(parents=True)
+    store.manifest_path(elsewhere).write_text("principal: {}\n", encoding="utf-8")
+    return ["manifest.yaml"]
+
+
+@pytest.mark.parametrize(
+    "the_directory_run_from",
+    [
+        pytest.param(_never_wrapped, id="never-wrapped"),
+        pytest.param(_of_the_earlier_layout, id="of-the-earlier-layout"),
+    ],
+)
+def test_the_audit_environment_is_the_reported_projects_and_not_the_working_directorys(
+    project, store, tmp_path, monkeypatch, the_directory_run_from
+):
+    """`tegh posture --project X` is about X wherever it is run from.
+
+    The audit's environment is built for the project reported on. Built for the
+    working directory it would name that directory's database and credential
+    map, create the map there, and, run from a project of the earlier layout,
+    be refused for a layout the reported project does not have.
+    """
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    there_before = the_directory_run_from(store, elsewhere)
+    monkeypatch.chdir(elsewhere)
+    _empty_database(project, store)
+    handed_over: list[dict] = []
+
+    def run(env, db_path):
+        handed_over.append({**env, "audited": db_path})
+        return _fake_audit(0, _clean_payload())(env, db_path)
+
+    report = _report(project, store, audit_runner=run)
+
+    assert handed_over, report.store[0]
+    (env,) = handed_over
+    assert env["audited"] == str(store.db_path(project))
+    assert env["BROKER_SQLITE_PATH"] == str(store.db_path(project))
+    assert env["BROKER_SECRETS_FILE"] == str(store.secrets_path(project))
+    there = store.project_dir(elsewhere)
+    found_there = sorted(p.name for p in there.iterdir()) if there.exists() else []
+    assert found_there == there_before
+    assert not [value for value in env.values() if str(there) in value], env
 
 
 # ---------------------------------------------------------------------------
