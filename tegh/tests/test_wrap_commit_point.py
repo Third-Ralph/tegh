@@ -7,8 +7,8 @@ stopped there is not rolled back. It reports, and the rule is about what it
 leaves:
 
 - the project is wrapped;
-- each tool is admitted and served, or a call to it is refused, and the line
-  says which, by name;
+- each tool is admitted and served, or a call to it does not execute, and the
+  line says which, by name;
 - nothing is served under a definition the tegh.lock on disk does not pin;
 - the commands the line gives are run here exactly as printed, and end in a
   project with every tool admitted.
@@ -41,8 +41,10 @@ from tegh.cli import _parse_args, main, unwrap_command, wrap_command  # noqa: E4
 from tegh.launch import python_module_argv  # noqa: E402
 from tegh.tests.stopping import (  # noqa: E402
     AS_READS,
+    ENTRY,
     GET_ENTRY,
     LIST_ENTRIES,
+    PAGE,
     REFUSED,
     EXECUTES,
     executes_under,
@@ -60,10 +62,17 @@ from tegh.tests.wrapping import (  # noqa: E402
     scripted,
     serve_versioned,
     store_of,
+    tape_records,
 )
 
 _TOOLS = [GET_ENTRY, LIST_ENTRIES]
 _PAST_THE_POINT = "after the point where a wrap can still be put back"
+#: What the line says of the tools it then names. True of a read, which is
+#: refused, and of a held write, which is held and refused on approval.
+_NOT_SERVED = (
+    "NOT admitted and not served, so a call to one does not execute (it is "
+    "refused, or held for approval and refused when approved): "
+)
 _EVERY_TOOL = {
     (GET_ENTRY, V1): executes_under(V1),
     (GET_ENTRY, V2): REFUSED,
@@ -121,7 +130,7 @@ def _assert_part_admitted(harness: dict, capsys, said: str, stop: _Stop) -> None
     assert said.startswith(f"{stop.label}: ") and _PAST_THE_POINT in said, said
     assert f"only {len(served)} of 2 tool(s) were admitted" in said
     assert f"Admitted and served: {', '.join(served) or 'none'}." in said
-    assert f"NOT admitted, and refused if called: {', '.join(waiting)}." in said
+    assert f"{_NOT_SERVED}{', '.join(waiting)}." in said
     # What it proposed and never ratified is withdrawn. The one the test
     # rejected to make a ratification fail is already gone, and cannot be.
     became = (
@@ -190,6 +199,53 @@ def test_a_wrap_stopped_after_its_commit_point_is_safe_and_can_be_finished(
         assert "'rejected', not pending" in said
     _assert_part_admitted(harness, capsys, said, stop)
     _follow_the_line(harness, capsys, said, interposed="--no-rewrite" not in stop.flags)
+
+
+def test_a_held_write_that_was_not_admitted_is_held_and_refused_when_approved(
+    harness, capfd, tmp_path_factory
+) -> None:
+    """Both tools confirmed as the server proposes them, as held writes; one admitted.
+
+    The broker holds a write before the connector is asked whether the manifest
+    names the tool. So a call to the tool that was not admitted is not refused:
+    it is held, word for word as a call to the admitted one is, and the line
+    must not say otherwise. Approving the two held calls is where they part.
+    The admitted tool executes; the other is refused, and never ran.
+
+    capfd, because `tegh approve` is a process of its own.
+    """
+    serve_versioned(harness, V1)
+    assert main(["init"]) == 0
+    project = str(harness["project"])
+
+    done = run_gated(
+        harness, tmp_path_factory.mktemp("notes"), "--admit-all", typed="",
+        gate="before-admit-ratify-0", send=signal.SIGTERM,
+    )
+
+    said = done.stderr.strip()
+    assert done.returncode == 128 + signal.SIGTERM, said
+    assert f"Admitted and served: {GET_ENTRY}. {_NOT_SERVED}{LIST_ENTRIES}." in said
+
+    for tool, args, served in (("get_entry", ENTRY, True), ("list_entries", PAGE, False)):
+        capfd.readouterr()
+        assert main(["call", f"ledger__{tool}", "--args", args, "--project", project]) == 1
+        answered = capfd.readouterr()
+        held = re.search(
+            rf"ledger\.{tool} is held for approval \(intent (intent-[0-9a-f]+)\); it has NOT executed",
+            answered.out + answered.err,
+        )
+        assert held, answered.out + answered.err
+        released = main(["approve", held.group(1), "--yes", "--project", project])
+        assert (released == 0) == served, capfd.readouterr().err
+        assert ("RELEASED" in capfd.readouterr().out) == served
+
+    assert [(record["op"], record["outcome"]) for record in tape_records(harness)] == [
+        ("get_entry", "held"),
+        ("get_entry", "executed"),
+        ("list_entries", "held"),
+        ("list_entries", "failed"),
+    ]
 
 
 def test_a_signal_after_the_last_ratification_changes_nothing(
