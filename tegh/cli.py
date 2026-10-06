@@ -1788,6 +1788,10 @@ def _write_wrap(
       and the next `tegh wrap` starts over and overwrites them.
     - after the lock: the same, beside a lock that pins what was reviewed.
       Still no call executes; the next `tegh wrap` replaces the lock.
+    - while the backup is being written: it is written beside its own path
+      and renamed into place (`interpose.write_backup`), so this is the case
+      above, with no backup, or the case below, with a complete one. There is
+      never a backup that does not parse.
     - after the backup, with the config not yet or only partly rewritten: the
       backup holds every server definition as it was. The next `tegh wrap`
       refuses and names `tegh unwrap` (`_displaced_by_an_earlier_wrap`), which
@@ -1824,9 +1828,7 @@ def _write_wrap(
         harness=harness.value,
         relocated=prepared.decisions.relocated,
     )
-    backup_path = store.backup_path(project)
-    backup_path.parent.mkdir(parents=True, exist_ok=True)
-    backup_path.write_text(backup.to_json(), encoding="utf-8")
+    interpose.write_backup(store.backup_path(project), backup)
 
     # Recorded NOW and not when the wrap began: the harness writes its own
     # state into these files while a wrap waits at its questions, and a

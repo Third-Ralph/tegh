@@ -762,6 +762,24 @@ def backup_of(
     )
 
 
+def write_backup(path: Path, backup: WrapBackup) -> None:
+    """Put a backup on disk whole, or not at all.
+
+    The backup is what a wrap that dies before its config is rewritten is
+    recovered by: the next `tegh wrap` sees the file and sends the person to
+    `tegh unwrap`, which reads it. Written in place, a wrap killed between the
+    file's creation and its content would leave an empty or cut-short one, and
+    then the wrap refuses for the backup and the unwrap refuses because it
+    does not parse. So it is written beside the real one and renamed over it,
+    as a config is (`_replace_file`): a killed wrap leaves no backup, or a
+    complete one. A wrap only ever creates this file, so it is owner-only from
+    its first byte, which suits a record of every server definition a config
+    held.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _replace_file(path, backup.to_json())
+
+
 def write_interposition(plan: InterposePlan) -> None:
     """Displace every real server and install the gateway. The second half."""
     if plan.gateway_site is None:
