@@ -188,17 +188,32 @@ The review ends by telling you what you just chose:
   !! 1 admitted tool(s) are classified as IRREVERSIBLE WRITES: create_entities
      The broker HOLDS every call to these; none executes until you release it with
      `tegh approve <intent-id>` — once per call, not once for the tool. If any is
-     really a read, re-run `tegh wrap` and correct it with [e] — a missing
-     readOnlyHint is what proposed the write.
+     really a read, run `tegh unwrap`, then `tegh wrap` again, and correct it with
+     [e] — a missing readOnlyHint is what proposed the write.
 ```
 
 Then the admissions, a signed `tegh.lock` in the project, and `INTERPOSED`:
 
 ```
+==============================================================================
+PROPOSING (maker; nothing is admitted until the checker ratifies)
+==============================================================================
+  proposed  memory/create_entities
+  proposed  memory/open_nodes
+  proposed  memory/read_graph
+  proposed  memory/search_nodes
+
+==============================================================================
+ADMITTING (checker ratifies, one tool at a time)
+==============================================================================
+  grants issued for the admitted coordinates (store: /Users/you/.tegh/tegh.db)
+  admitted  memory/create_entities
+  admitted  memory/open_nodes
+  admitted  memory/read_graph
+  admitted  memory/search_nodes
+
 wrote /Users/you/tegh-demo/tegh.lock — 4 tool(s) pinned across 1 server(s)
   signed by tegh-local-248fb1d327fa -> tegh.lock.sig
-
-grants issued for the admitted coordinates (store: /Users/you/.tegh/tegh.db)
 
 ==============================================================================
 INTERPOSED
@@ -213,6 +228,26 @@ Restore with: tegh unwrap --project /Users/you/tegh-demo
 ```
 
 The harness config now names one server, `tegh`, and the memory server is reached only through it.
+
+A wrap has a commit point, and it is the line between those two headings. Before it, the wrap
+writes files (its manifest, the lock, the backup and the harness config, in that order) and
+proposes each admission. A proposal makes no tool callable. If the wrap stops there (Ctrl-C, a
+`kill`, a closed terminal, input that ends at a question, no server reachable, no tool admitted, a
+failed proposal), it puts back every file it had written, withdraws its proposals, and says so in
+one line that starts `REFUSED`, `INTERRUPTED`, `NOT WRAPPED` or `FAILED`. Nothing was admitted, so
+a call gets the answer it got before the command.
+
+After the commit point the wrap issues the grants and ratifies the admissions, one tool at a time,
+and its manifest names a tool only once that tool's admission is ratified. None of that can be
+taken back, so a wrap that stops there is not rolled back. It ends `FAILED` or `INTERRUPTED` with
+one line that says the project is wrapped, names the tools that were admitted and the ones that
+were not, and gives the commands to run: `tegh unwrap` to undo it, and then `tegh wrap` again to
+finish. A tool that was not admitted is refused if it is called.
+
+The order of those writes is what covers the stop nothing can report, a `kill -9` or a power cut.
+At every point in a wrap of this project, a call for it executes only what it executed before the
+wrap or what you reviewed in this one, and never under a definition that neither the earlier
+`tegh.lock` nor the one on disk pins.
 
 > If you admit `create_entities` as the server proposes it, with `y` alone, the classification no
 > longer holds the write. Made on its own with `tegh call` (§5), it executes, because you accepted
@@ -468,13 +503,14 @@ description and the live one in full, one above the other. Until you admit the t
 refuses calls to it, the tape records `not callable (drifted)`, and the server's other tools keep
 working. The memory server does not change its descriptions, so this walk cannot show you a drift.
 
-Two things about recovering from one, as of 0.1.1:
+Two things about recovering from one:
 
-- The drift report ends by naming a flag, `--acknowledge-description-change`, that no `tegh` command
-  accepts (#10). To admit the changed tool, run `tegh unwrap` and then `tegh wrap` again. The review
-  shows you the live description, and what you admit there is what gets pinned.
-- Run `tegh unwrap` first. A `tegh wrap` on a project that is still wrapped finds only the gateway,
-  admits nothing, and replaces `tegh.lock` with an empty one (#11).
+- As of 0.1.1 the drift report ends by naming a flag, `--acknowledge-description-change`, that no
+  `tegh` command accepts (#10). To admit the changed tool, run `tegh unwrap` and then `tegh wrap`
+  again. The review shows you the live description, and what you admit there is what gets pinned.
+- Run `tegh unwrap` first. A `tegh wrap` on a project that is still wrapped refuses and changes
+  nothing, and the refusal names the `tegh unwrap` command to run. tegh 0.1.1 did not refuse: it
+  found only the gateway, admitted nothing, and replaced `tegh.lock` with an empty one (#11).
 
 ## 9. Undo
 
@@ -522,6 +558,13 @@ wrap (with `claude mcp add`, or a new `.mcp.json`) is kept, and the plan names i
 ending `added since the wrap`. If it has the same name as a server the unwrap is about to put back,
 tegh refuses before changing anything and names the scope and the server; rename or remove one of
 the two and run it again.
+
+If the harness home had no `.claude.json` when you wrapped, the wrap created one for its entry.
+The unwrap removes that file again when nothing else has been added to it, on a `remove` line
+ending `the file itself, which the wrap created and nothing else has been added to`. If something
+has been added, the file stays holding just that, and the empty `projects` entry the wrap made for
+this project comes out on a `remove` line of its own. A file that was there before the wrap is
+never removed.
 
 This walk relocated no credential. When a wrap did move one out of your config (you answered
 CREDENTIAL in the review), the plan carries two more lines for it, naming the server and the field
