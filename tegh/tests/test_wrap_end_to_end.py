@@ -355,19 +355,36 @@ _MEMORY_COORDINATE = "local:ledger.env.MEMORY_FILE_PATH"
 _HEADER_COORDINATE = "local:ledger.headers.X-Widget-Trace"
 
 
-def _stranded_coordinates(out: str) -> list[str]:
-    """The coordinates the wrap reported as classified-but-undelivered."""
+_LISTED = "       "  # a coordinate line; the sentence above it is indented less
+
+
+def _listed_under(out: str, sentence: str) -> list[str]:
+    """The coordinates the wrap listed under the report that opens with `sentence`."""
     lines = out.splitlines()
     for index, line in enumerate(lines):
-        if "NOT delivered to the wrapped" not in line:
+        if sentence not in line:
             continue
+        rest = lines[index + 1:]
+        # The sentence runs on for a line or two before the list begins.
+        while rest and rest[0].startswith("     ") and not rest[0].startswith(_LISTED):
+            rest = rest[1:]
         listed: list[str] = []
-        for text in lines[index + 2:]:  # the sentence continues on the next line
-            if not text.startswith("       "):
+        for text in rest:
+            if not text.startswith(_LISTED):
                 break
             listed.append(text.strip())
         return listed
     return []
+
+
+def _stranded_coordinates(out: str) -> list[str]:
+    """The coordinates the wrap reported as classified-but-undelivered."""
+    return _listed_under(out, "NOT delivered to the wrapped")
+
+
+def _unexpanded_references(out: str) -> list[str]:
+    """The `${VAR}` fields the wrap reported the wrapped server will not receive."""
+    return _listed_under(out, "these fields reference environment variables")
 
 
 def test_a_value_called_configuration_reaches_the_server_tegh_spawns(
@@ -816,6 +833,11 @@ def _wrap_vendor_with_a_region(credentialed: dict) -> int:
     credentialed["claude_json"].write_text(
         json.dumps(document, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+    return _wrap_vendor(credentialed)
+
+
+def _wrap_vendor(credentialed: dict) -> int:
+    """Wrap `vendor`: the key is a credential, a region is configuration, tools are reads."""
     return wrap_command(
         _parse_args(
             [
@@ -895,6 +917,239 @@ def test_the_child_reports_what_the_manifest_carries_not_what_the_wrap_saw(
     manifest_path.write_text(yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8")
 
     assert _whoami(credentialed, capsys)["region"] == ""
+
+
+# ---------------------------------------------------------------------------
+# One server name at two scopes: the winning declaration is the one reached (#1)
+# ---------------------------------------------------------------------------
+
+_SHADOWED_REGION = "ap-fixture-shadowed"
+
+# One launcher per declaring scope. Each starts the same toy and first writes
+# its own scope to a shared log, so a declaration is told apart by the command
+# that ran as well as by the environment that arrived.
+_LAUNCHER = """\
+import pathlib, runpy
+with pathlib.Path({log!r}).open("a", encoding="utf-8") as log:
+    log.write({scope!r} + "\\n")
+runpy.run_module({toy!r}, run_name="__main__")
+"""
+
+
+def _launch_log(credentialed: dict) -> Path:
+    return credentialed["home"].parent / "launches.log"
+
+
+def _launches(credentialed: dict) -> list[str]:
+    """The declaring scope of every launcher that has run, in order."""
+    log = _launch_log(credentialed)
+    return log.read_text(encoding="utf-8").split() if log.exists() else []
+
+
+def _config_bytes(credentialed: dict) -> dict[Path, bytes]:
+    """Every harness config file that exists, by content."""
+    paths = (credentialed["claude_json"], credentialed["project"] / ".mcp.json")
+    return {path: path.read_bytes() for path in paths if path.exists()}
+
+
+def _live_servers(credentialed: dict) -> dict[str, list[str]]:
+    """The server names Claude Code would load from each scope, read off disk."""
+    project_mcp = credentialed["project"] / ".mcp.json"
+    home = json.loads(credentialed["claude_json"].read_text(encoding="utf-8"))
+    committed = (
+        json.loads(project_mcp.read_text(encoding="utf-8")) if project_mcp.exists() else {}
+    )
+    blocks = {
+        "local": home["projects"][str(credentialed["project"])].get("mcpServers", {}),
+        "project": committed.get("mcpServers", {}),
+        "user": home.get("mcpServers", {}),
+    }
+    return {scope: sorted(block) for scope, block in blocks.items()}
+
+
+def _declare_vendor_at(credentialed: dict, env_by_scope: dict[str, dict[str, str]]) -> dict:
+    """Declare `vendor` at exactly the given Claude Code scopes, each with its own
+    `env` and its own launcher.
+
+    Returns each config file's bytes as written, for the unwrap to be held to.
+    """
+    def entry(scope: str) -> dict:
+        launcher = credentialed["home"].parent / f"launch_from_{scope}.py"
+        launcher.write_text(
+            _LAUNCHER.format(
+                log=str(_launch_log(credentialed)), scope=scope, toy=_CREDENTIALED_TOY
+            ),
+            encoding="utf-8",
+        )
+        return {
+            "command": sys.executable,
+            "args": [str(launcher)],
+            "env": env_by_scope[scope],
+        }
+
+    project_mcp = credentialed["project"] / ".mcp.json"
+    document = json.loads(credentialed["claude_json"].read_text(encoding="utf-8"))
+    project_entry = document["projects"][str(credentialed["project"])]
+    project_entry.pop("mcpServers", None)
+    if "local" in env_by_scope:
+        project_entry["mcpServers"] = {"vendor": entry("local")}
+    if "user" in env_by_scope:
+        document["mcpServers"] = {"vendor": entry("user")}
+    if "project" in env_by_scope:
+        # Accepted, as a human does once interactively; a `.mcp.json` server is
+        # otherwise pending, and which entry then loads is not documented.
+        project_entry["enabledMcpjsonServers"] = ["vendor"]
+        project_mcp.write_text(
+            json.dumps(
+                {"mcpServers": {"vendor": entry("project")}},
+                indent=2,
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+    credentialed["claude_json"].write_text(
+        json.dumps(document, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    return _config_bytes(credentialed)
+
+
+@pytest.mark.parametrize(
+    ("winner", "loser"),
+    [("local", "project"), ("local", "user"), ("project", "user")],
+)
+def test_a_server_declared_at_two_scopes_is_reached_by_its_winning_declaration(
+    credentialed, capsys, winner: str, loser: str
+) -> None:
+    """#1: scope shadowing, proven at the child the gateway spawns.
+
+    Claude Code resolves a name declared at two scopes by precedence (local,
+    then project, then user) and the whole winning entry loads; fields are
+    never merged (docs/references/harnesses/claude-code.md §1 "Scope hierarchy
+    and precedence"). Discovery's unit tests pin that resolution, and the wrap
+    then carries values by scope. Nothing observed the two together: a wrap
+    that resolved the right winner and then handed it the loser's `env` would
+    have passed every one of them.
+
+    The two declarations differ in what the server reports about itself and
+    in the command that starts it, so the wrong one cannot be mistaken for the
+    right one on either count. Only the winner holds
+    the key: a credential on a declaration the wrap does not construct refuses
+    the wrap, which is a different path from this one.
+    """
+    before = _declare_vendor_at(
+        credentialed,
+        {
+            winner: {"LEDGER_API_KEY": _API_KEY, "LEDGER_REGION": _REGION},
+            loser: {"LEDGER_REGION": _SHADOWED_REGION},
+        },
+    )
+
+    assert main(["init"]) == 0
+    capsys.readouterr()
+    rc = _wrap_vendor(credentialed)
+    out = capsys.readouterr().out
+    assert rc == 0, out
+
+    # The losing declaration is displaced with the rest of its block: read
+    # back, no scope still names `vendor`. Left live, it would be the server
+    # Claude Code loads directly once the winner's entry is gone.
+    assert _live_servers(credentialed) == {"local": ["tegh"], "project": [], "user": []}
+    # So the wrap says its value goes nowhere, and names that one and not the
+    # winner's.
+    assert _stranded_coordinates(out) == [f"{loser}:vendor.env.LEDGER_REGION"], out
+
+    # The server the gateway reaches started from the winning declaration.
+    snapshots = _launches(credentialed)
+    report = _whoami(credentialed, capsys)
+    assert report["region"] == _REGION
+    assert report["fingerprint"] == _API_KEY_FINGERPRINT
+    # ...by the winning declaration's command, for the call as for the wrap's
+    # own snapshot. The loser's launcher never ran at all.
+    launches = _launches(credentialed)
+    assert len(launches) > len(snapshots) > 0, launches
+    assert set(launches) == {winner}, launches
+
+    store = TeghStore(home=credentialed["tegh_home"])
+    manifest_text = store.manifest_path(credentialed["project"]).read_text(encoding="utf-8")
+    assert _SHADOWED_REGION not in manifest_text
+
+    # Both declarations come back as they were, each at its own scope.
+    assert main(["unwrap", "--yes", "--project", str(credentialed["project"])]) == 0
+    assert _config_bytes(credentialed) == before
+
+
+# ---------------------------------------------------------------------------
+# A ${VAR} reference is not expanded, and the wrap says so (#1)
+# ---------------------------------------------------------------------------
+
+_REFERENCED_VARIABLE = "WIDGET_REGION"
+_REFERENCE = "${" + _REFERENCED_VARIABLE + "}"
+
+
+def test_a_reference_tegh_does_not_expand_is_named_and_does_not_arrive(
+    credentialed, monkeypatch, capsys
+) -> None:
+    """#1: the `${VAR}` report, produced by the wrap a user runs.
+
+    `render_undelivered_references` was pinned as a string and never reached
+    through `tegh wrap`, so the report could be built correctly and printed by
+    nothing. Both halves of the sentence are checked: the wrap names the field,
+    and the server confirms what the wrap said about it.
+
+    The variable is SET in the wrapping process on purpose. Unset, "not
+    delivered" and "expanded to nothing" would look the same from the child.
+    """
+    monkeypatch.setenv(_REFERENCED_VARIABLE, _REGION)
+    _declare_vendor_at(
+        credentialed,
+        {"local": {"LEDGER_API_KEY": _API_KEY, "LEDGER_REGION": _REFERENCE}},
+    )
+
+    assert main(["init"]) == 0
+    capsys.readouterr()
+    rc = _wrap_vendor(credentialed)
+    out = capsys.readouterr().out
+    assert rc == 0, out
+
+    # What the user sees: the one referencing field, by coordinate, under the
+    # sentence that says what happens to it.
+    assert _unexpanded_references(out) == ["local:vendor.env.LEDGER_REGION"], out
+    assert "tegh does not expand a ${VAR}" in out
+    # A reference is not a literal, so it is neither asked about nor reported
+    # as a classified value that went nowhere.
+    assert _stranded_coordinates(out) == []
+    assert _REGION not in out, "the referenced variable's value must never be printed"
+
+    # And the sentence is true: the child got neither the expansion nor the
+    # reference text.
+    assert _whoami(credentialed, capsys)["region"] == ""
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="a wrap whose config holds no literal value returns before the "
+    "${VAR} report is reached, so it never says the server will not receive one",
+)
+def test_a_reference_is_named_when_the_config_holds_no_literal_value(
+    harness, capsys
+) -> None:
+    """The same report, for the config that has nothing else to ask about.
+
+    A config whose only `env` values are references is the one a careful user
+    writes, and it is the one this report matters most to: no question is
+    asked about it. Discovery's finding still notes that the field is a
+    reference tegh does not expand; the consequence, that the wrapped server
+    will not receive it, is what this report adds and what goes unsaid.
+    """
+    _give_ledger(harness, env={"LEDGER_REGION": _REFERENCE})
+
+    assert main(["init"]) == 0
+    capsys.readouterr()
+    assert wrap_admit_all(harness) == 0
+    out = capsys.readouterr().out
+
+    assert _unexpanded_references(out) == ["local:ledger.env.LEDGER_REGION"], out
 
 
 def test_an_undeliverable_credential_says_so_instead_of_naming_a_taskgroup(
