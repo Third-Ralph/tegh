@@ -301,10 +301,12 @@ class TeghStore:
         try:
             with os.fdopen(handle, "w", encoding="utf-8") as stream:
                 json.dump(dict(secrets_map), stream, indent=2, sort_keys=True)
+            # Inside the guard: a Ctrl-C between the write and the rename would
+            # otherwise leave the values in a file no rollback knows by name.
+            tmp.replace(path)
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise
-        tmp.replace(path)
 
     @property
     def is_provisioned(self) -> bool:
