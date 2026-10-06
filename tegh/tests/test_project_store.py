@@ -612,3 +612,29 @@ def test_no_row_of_a_readable_earlier_database_reaches_another_projects(earlier,
     assert main(["call", _TOOL, "--args", _ENTRY, "--project", str(second["project"])]) == 0
     assert f"served under: {_SECOND_SAYS}" in capsys.readouterr().out
     assert _as_it_stands(earlier["sealed"]["path"]) == stands
+
+
+def test_the_layout_marker_is_written_whole_or_not_at_all(tmp_path, monkeypatch) -> None:
+    """A wrap stopped while writing the marker leaves no marker, never part of one.
+
+    The rename is the write. With it failing, the project has no marker and is
+    refused as an earlier wrap would be, which is the state the refusal's own
+    commands get it out of. A name left by a tegh that died here does not stop
+    the next one.
+    """
+    store = TeghStore(home=tmp_path / "tegh-home")
+    project = tmp_path / "project"
+    marker = store.layout_path(project)
+
+    def _fails(*_args, **_kwargs):
+        raise OSError("the disk is full")
+
+    monkeypatch.setattr("tegh.store.os.replace", _fails)
+    with pytest.raises(OSError):
+        store.mark_layout(project)
+    assert not marker.exists()
+    monkeypatch.undo()
+
+    store.mark_layout(project)
+    assert marker.read_text(encoding="utf-8") == "2\n"
+    assert sorted(entry.name for entry in marker.parent.iterdir()) == ["layout"]
