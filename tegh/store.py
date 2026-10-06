@@ -186,7 +186,12 @@ class TeghStore:
         """Record that this project's manifest was written for this layout."""
         path = self.layout_path(project)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(STORE_LAYOUT + "\n", encoding="utf-8")
+        # Written beside and renamed, so the marker is either absent or whole. A
+        # marker caught half-written would read as an unknown layout, which is
+        # refused, but with words about a different version of tegh.
+        tmp = path.with_name(path.name + ".tegh-tmp")
+        tmp.write_text(STORE_LAYOUT + "\n", encoding="utf-8")
+        os.replace(tmp, path)
 
     def layout_refusal(self, project: Path | str) -> Optional[str]:
         """Why nothing is served for this project, or None when something can be.
