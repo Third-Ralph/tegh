@@ -77,3 +77,32 @@ def test_a_process_that_could_not_be_stopped_is_named_in_the_one_line(
         "tegh could not stop every process this wrap started, and these may still "
         "be running: pid 4242, 4243." in failure
     )
+
+
+# ---------------------------------------------------------------------------
+# A credential map half-written
+# ---------------------------------------------------------------------------
+
+
+def test_a_ctrl_c_as_the_credential_map_is_renamed_leaves_no_copy_behind(
+    harness, monkeypatch
+) -> None:
+    """The temporary file holds the values, and no rollback knows its name.
+
+    The interrupt is raised from the rename itself, the last step of the
+    write: the temporary file must be gone and the map must not exist.
+    """
+    from pathlib import Path  # noqa: PLC0415
+
+    assert main(["init"]) == 0
+    store, project = store_of(harness), harness["project"]
+
+    def _interrupted(self, target):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(Path, "replace", _interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        store.write_secret_leaf(project, "ledger", {"LEDGER_API_KEY": "not-a-real-credential"})
+    monkeypatch.undo()
+
+    assert list(store.secrets_path(project).parent.iterdir()) == []
