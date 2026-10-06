@@ -1112,7 +1112,7 @@ def _already_wrapped(result: DiscoveryResult, project: Path) -> Optional[str]:
         if TeghStore(home=Path(home)).backup_path(project).exists():
             way_out = (
                 "restore the original servers with `tegh unwrap --project "
-                f"{project} --home {home}`"
+                f"{_path(project)} --home {_path(home)}`"
             )
         else:
             # Taking the entry out is not enough to wrap again: the servers
@@ -1849,6 +1849,7 @@ def _report_wrapped(
 ) -> None:
     """Say what a committed wrap wrote, and what it left for the person to do."""
     lock_path, signature_path = lock_paths(project)
+    home = _with_home(args, store)
     servers = prepared.lock.servers
     total = sum(len(server.admitted) for server in servers)
     print(f"\nwrote {lock_path} — {total} tool(s) pinned across {len(servers)} server(s)")
@@ -1908,13 +1909,13 @@ def _report_wrapped(
             f"\n  !! not wrapped, because it could not be reached: {unreachable}\n"
             "     It was displaced with the rest, so the gateway does not serve it "
             "and the harness no\n     longer loads it. To wrap it: run `tegh "
-            f"unwrap --project {_path(project)}`,\n     fix the server, then run "
+            f"unwrap --project {_path(project)}{home}`,\n     fix the server, then run "
             "`tegh wrap` again."
         )
     print(
-        f"\nSee what the broker records: tegh audit --verify --project {_path(project)}"
+        f"\nSee what the broker records: tegh audit --verify --project {_path(project)}{home}"
     )
-    print(f"Restore with: tegh unwrap --project {_path(project)}")
+    print(f"Restore with: tegh unwrap --project {_path(project)}{home}")
 
 
 def _seed_grants(transaction: WrapTransaction, store: TeghStore, project: Path) -> None:

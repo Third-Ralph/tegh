@@ -1,20 +1,110 @@
 """What `tegh wrap` prints is followed word for word, so it has to work that way.
 
-One thing a message can get wrong without any file being wrong: a ceremony's
-failure arrives as a Python traceback folded into a sentence.
+Two things a message can get wrong without any file being wrong:
 
-It is driven through the real command.
+- a command it names leaves out the tegh home the wrap was given, so the
+  command looks somewhere else and refuses;
+- a ceremony's failure arrives as a Python traceback folded into a sentence.
+
+Each is driven through the real command, and each printed command is run.
 """
 
 from __future__ import annotations
+
+import json
+import re
+import shlex
+import sys
 
 import pytest
 
 pytest.importorskip("mcp", reason="a real wrap snapshots a real MCP server")
 
 from tegh.cli import _parse_args, main, wrap_command  # noqa: E402
-from tegh.tests.wrapping import scripted, store_of, wrap_argv  # noqa: E402
+from tegh.lockfile import lock_paths  # noqa: E402
+from tegh.tests.wrapping import TOY, scripted, store_of, wrap_argv  # noqa: E402
 from tegh.transaction import WrapTransaction  # noqa: E402
+
+# ---------------------------------------------------------------------------
+# A wrap given `--home`
+# ---------------------------------------------------------------------------
+
+
+def _printed_command(out: str, starts: str) -> list[str]:
+    """The one command in `out` that starts with `starts`, as an argv after `tegh`."""
+    found = re.findall(rf"({re.escape(starts)}[^`\n]*)", out)
+    assert len(found) == 1, (starts, found)
+    return shlex.split(found[0])[1:]
+
+
+def _ledger_and_one_dead_server(harness: dict, *, dead: bool) -> None:
+    document = json.loads(harness["claude_json"].read_text(encoding="utf-8"))
+    document["projects"][str(harness["project"])]["mcpServers"]["down"] = {
+        "command": sys.executable,
+        "args": ["-c", "import sys; sys.exit(3)"] if dead else ["-m", TOY],
+    }
+    harness["claude_json"].write_text(
+        json.dumps(document, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def test_every_command_a_wrap_given_a_home_prints_can_be_run_as_printed(
+    harness, capsys, monkeypatch
+) -> None:
+    """`--home` on the wrap, and no TEGH_HOME: the printed commands must carry it.
+
+    Without it each of them looks in `~/.tegh`, finds no wrap there, and
+    refuses; and the wrap they were supposed to lead back to refuses as well,
+    because the project is still wrapped. Here the advice for a server that
+    could not be reached is followed to the end, and the other printed
+    commands are run as they stand.
+
+    The home has a space in its name, so each printed command also has to
+    quote it: a shell would otherwise hand `--home` half a path.
+    """
+    elsewhere = harness["home"].parent / "tegh home"
+    monkeypatch.delenv("TEGH_HOME")
+    monkeypatch.setenv("HOME", str(harness["home"]))  # so `~/.tegh` is not a real one
+    at_home = ["--home", str(elsewhere)]
+    assert main(["init", *at_home]) == 0
+    _ledger_and_one_dead_server(harness, dead=True)
+    capsys.readouterr()
+
+    assert main([*wrap_argv(harness, "--admit-all"), *at_home]) == 0
+    out = capsys.readouterr().out
+
+    assert not (harness["home"] / ".tegh").exists()
+    advice, closing = out.split("See what the broker records: ")
+    advised = _printed_command(advice, "tegh unwrap --project")
+    audit = _printed_command(closing, "tegh audit --verify")
+    restore = _printed_command(closing, "tegh unwrap --project")
+    assert advised == restore and advised[-2:] == at_home
+    assert main(audit) == 0
+    assert "no wrap backup" not in capsys.readouterr().err
+
+    # A second wrap is refused, and the unwrap that refusal names is the same one.
+    assert main([*wrap_argv(harness, "--admit-all"), *at_home]) == 2
+    assert _printed_command(capsys.readouterr().err, "tegh unwrap --project") == advised
+
+    # The advice, in its order: unwrap as printed, fix the server, wrap again.
+    assert main([*advised, "--yes"]) == 0
+    _ledger_and_one_dead_server(harness, dead=False)
+    assert main([*wrap_argv(harness, "--admit-all"), *at_home]) == 0
+    lock = json.loads(lock_paths(harness["project"])[0].read_text(encoding="utf-8"))
+    assert sorted(server["server_id"] for server in lock["servers"]) == ["down", "ledger"]
+    assert not (harness["home"] / ".tegh").exists()
+
+
+def test_a_wrap_given_no_home_prints_commands_without_one(harness, capsys) -> None:
+    assert main(["init"]) == 0
+    capsys.readouterr()
+
+    assert main(wrap_argv(harness, "--admit-all")) == 0
+
+    out = capsys.readouterr().out
+    assert f"Restore with: tegh unwrap --project {harness['project']}\n" in out
+    assert "--home" not in out
+
 
 # ---------------------------------------------------------------------------
 # A ceremony that fails for a real reason
