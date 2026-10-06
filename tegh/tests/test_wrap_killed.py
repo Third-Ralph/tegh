@@ -16,7 +16,12 @@ executes is compared with what executed before and what the finished wrap
 serves. SIGTERM and SIGHUP are sent the same way; a wrap handles those, so it
 must also end in one of its two reported states, or be finished.
 
-Three starting points:
+A kill at a named step is also held to the rule that makes the rest true: the
+manifest on disk names exactly the tools this wrap had ratified AND named by
+that step. A tool it names any earlier is one the store may still hold an
+earlier admission of.
+
+Four starting points:
 
 - a project never wrapped;
 - one committed with `--no-rewrite`, whose server then changed a definition;
@@ -24,6 +29,11 @@ Three starting points:
   definition, re-wrapped with both tools reclassified as reads. This is the
   one where a tool could come loose: the store still holds the admission of
   the earlier definition, and the wrap is about to stop holding the tool.
+- the same on two servers that have the same two tools, where the definitions
+  that changed are the SECOND tool of the first server and the first tool of
+  the second. Killed with only the first tool of the first server ratified,
+  the tool after it and the tool of its name on the other server are each
+  still admitted at the earlier definition, and neither may be named yet.
 
 A kill is also something to recover from. After each kill at a named step
 (and, in the sweep, after each random SIGKILL) the next thing a person would do
@@ -31,8 +41,10 @@ is done: `tegh wrap` again, with a `tegh unwrap` first when the wrap refuses
 for want of one. It has to end in the finished wrap.
 
 The default run is a small sample: the steps that matter and two random
-moments per starting point. The full sweep is every step and eighty random
-moments per starting point, and takes about half an hour:
+moments per starting point (none for the last, which is there for its one
+step). The full sweep is every step and eighty random
+moments per starting point, and takes far longer (about half an hour for
+the first three starting points):
 
     TEGH_KILL_SWEEP=1 python -m pytest tegh/tests/test_wrap_killed.py
 
@@ -43,6 +55,7 @@ from __future__ import annotations
 
 import os
 import random
+import re
 import signal
 import time
 from dataclasses import dataclass
@@ -54,7 +67,7 @@ pytest.importorskip("mcp", reason="a real wrap snapshots a real MCP server")
 
 from tegh.cli import _parse_args, main, wrap_command  # noqa: E402
 from tegh.tests.stopping import (  # noqa: E402
-    AS_READS,
+    AS_READ,
     EXECUTES,
     GET_ENTRY,
     HELD,
@@ -62,6 +75,7 @@ from tegh.tests.stopping import (  # noqa: E402
     REFUSED,
     executes_under,
     lock_bytes,
+    named,
     outcomes,
     pinned,
     put_back,
@@ -86,11 +100,21 @@ _SWEEP = os.environ.get("TEGH_KILL_SWEEP") == "1"
 _PAST_THE_POINT = "after the point where a wrap can still be put back"
 #: The store database and the audit tape only grow; see `test_wrap_transaction.py`.
 _ONLY_GROW = ("tegh.db", "audit.jsonl")
-_EVERY_STEP = [
-    f"{side}-{step}"
-    for step in ("admit-propose-0", "admit-propose-1", "seed-0", "admit-ratify-0", "admit-ratify-1")
-    for side in ("before", "after")
-]
+#: A second server with the toy's two tools, under its own name.
+MIRROR_GET, MIRROR_LIST = "mirror/get_entry", "mirror/list_entries"
+
+
+def _every_step(tools: int) -> list[str]:
+    """Both sides of every ceremony of a wrap that admits `tools` tools."""
+    return [
+        f"{side}-{step}"
+        for step in (
+            *(f"admit-propose-{n}" for n in range(tools)),
+            "seed-0",
+            *(f"admit-ratify-{n}" for n in range(tools)),
+        )
+        for side in ("before", "after")
+    ]
 
 
 def _never_wrapped(harness: dict) -> None:
@@ -112,6 +136,16 @@ def _held_then_changed(harness: dict) -> None:
     description_file(harness).write_text(V2, encoding="utf-8")
 
 
+def _held_on_two_servers_then_changed(harness: dict) -> None:
+    """Four tools admitted as held writes; then one definition changes on each server."""
+    serve_versioned(harness, V1, tool="list_entries")
+    serve_versioned(harness, V1, server="mirror")
+    assert main(["init"]) == 0
+    assert main(wrap_argv(harness, "--admit-all", "--no-rewrite")) == 0
+    for server in ("ledger", "mirror"):
+        description_file(harness, server).write_text(V2, encoding="utf-8")
+
+
 @dataclass(frozen=True)
 class _Start:
     id: str
@@ -122,6 +156,10 @@ class _Start:
     flags: tuple[str, ...] = ()
     #: The steps a default run is killed at; a sweep is killed at every step.
     steps: tuple[str, ...] = ()
+    #: How many tools the wrap reviews, proposes and ratifies.
+    tools: int = TOY_TOOL_COUNT
+    #: Whether a default run also kills it at random moments; a sweep always does.
+    at_random: bool = True
 
 
 _NOTHING = {(GET_ENTRY, V1): REFUSED, (GET_ENTRY, V2): REFUSED, (LIST_ENTRIES, ""): REFUSED}
@@ -146,6 +184,27 @@ _STARTS = [
         flags=("--no-rewrite",),
         steps=("before-admit-ratify-0", "before-admit-ratify-1"),
     ),
+    _Start(
+        "held-on-two-servers-then-reclassified", _held_on_two_servers_then_changed,
+        before={
+            (GET_ENTRY, ""): HELD, (LIST_ENTRIES, V1): HELD, (LIST_ENTRIES, V2): HELD,
+            (MIRROR_GET, V1): HELD, (MIRROR_GET, V2): HELD, (MIRROR_LIST, ""): HELD,
+        },
+        intended={
+            (GET_ENTRY, ""): EXECUTES,
+            (LIST_ENTRIES, V1): REFUSED, (LIST_ENTRIES, V2): executes_under(V2),
+            (MIRROR_GET, V1): REFUSED, (MIRROR_GET, V2): executes_under(V2),
+            (MIRROR_LIST, ""): EXECUTES,
+        },
+        flags=("--no-rewrite",),
+        # One tool ratified and named. The next tool, and the tool of the same
+        # name on the other server, are the two a wrap could name too early.
+        steps=("before-admit-ratify-1",),
+        tools=2 * TOY_TOOL_COUNT,
+        # Twice the tools is twice the calls after every kill, and the random
+        # moments of a default run are already spent on the starts above.
+        at_random=False,
+    ),
 ]
 
 
@@ -166,9 +225,9 @@ def _kills(start: _Start, took: float) -> list[_Kill]:
     handled = (signal.SIGTERM, signal.SIGHUP)
     if _SWEEP:
         sends = [signal.SIGKILL] * 40 + [handled[i % 2] for i in range(40)]
-        steps = _EVERY_STEP
+        steps = _every_step(start.tools)
     else:
-        sends = [signal.SIGKILL, handled[_STARTS.index(start) % 2]]
+        sends = [signal.SIGKILL, handled[_STARTS.index(start) % 2]] if start.at_random else []
         steps = start.steps
     return [
         *(_Kill(signal.SIGKILL, gate=step) for step in steps),
@@ -180,21 +239,42 @@ def _assert_never_more(
     harness: dict, capsys, start: _Start, kill: _Kill, lock_before: Optional[bytes]
 ) -> dict[tuple[str, str], str]:
     """After any stop: nothing executes but what did before or what was meant to."""
-    found = outcomes(harness, capsys)
+    found = outcomes(harness, capsys, tuple(start.before))
     for asked, got in found.items():
         assert got in {REFUSED, start.before[asked], start.intended[asked]}, (
             f"after {kill}, a call to {asked[0]} with the server advertising "
             f"{asked[1]!r} got {got!r}; before the wrap it got "
-            f"{start.before[asked]!r} and the finished wrap gives {start.intended[asked]!r}"
+            f"{start.before[asked]!r} and the finished wrap gives {start.intended[asked]!r} "
+            f"(the manifest on disk names {sorted(named(harness)) or 'no tool'})"
         )
-    pins = pinned(lock_before) | pinned(lock_bytes(harness))
-    for description in (V1, V2):
-        if found[GET_ENTRY, description] == executes_under(description):
+    for (tool, description), got in found.items():
+        if description and got == executes_under(description):
+            pins = pinned(lock_before, tool) | pinned(lock_bytes(harness), tool)
             assert description in pins, (
-                f"after {kill}, get_entry executes under {description!r}, which "
+                f"after {kill}, {tool} executes under {description!r}, which "
                 "neither the tegh.lock from before the wrap nor the one on disk pins"
             )
     return found
+
+
+def _assert_named_only_once_ratified(harness: dict, kill: _Kill, order: list[str]) -> None:
+    """Killed at a named step: the manifest names the tools ratified by then, and no other.
+
+    `order` is the order the wrap ratifies in. A wrap names a tool as the step
+    after its ratification, so held in front of the n-th ratification it has
+    named the n before it, and held behind that ratification it has still
+    named only those. At every earlier step it has named none.
+    """
+    _side, _, step = kill.gate.partition("-")
+    ceremony, _, count = step.rpartition("-")
+    ratified = order[: int(count)] if ceremony == "admit-ratify" else []
+    found = named(harness)
+    early = sorted(found - set(ratified))
+    assert not early, (
+        f"after {kill}, the manifest names {early}, which this wrap had not "
+        f"ratified; it had ratified and named {ratified or 'no tool'}"
+    )
+    assert found == set(ratified), f"after {kill}, the manifest names only {sorted(found)}"
 
 
 def _assert_ended_as_reported(
@@ -229,7 +309,7 @@ def _assert_a_wrap_then_finishes(harness: dict, capsys, start: _Start, kill: _Ki
     """What a person does next: wrap again, unwrapping first if the wrap says to."""
 
     def _wrap() -> int:
-        reads = scripted([*ADMIT_AS_READ * TOY_TOOL_COUNT])
+        reads = scripted([*ADMIT_AS_READ * start.tools])
         return wrap_command(_parse_args(wrap_argv(harness, *start.flags)), prompt=reads)
 
     status = _wrap()
@@ -239,7 +319,7 @@ def _assert_a_wrap_then_finishes(harness: dict, capsys, start: _Start, kill: _Ki
         assert unwrap_cli(harness, "--yes") == 0, f"after {kill}"
         status = _wrap()
     assert status == 0, f"after {kill}: {capsys.readouterr().err}"
-    assert outcomes(harness, capsys) == start.intended, f"after {kill}"
+    assert outcomes(harness, capsys, tuple(start.before)) == start.intended, f"after {kill}"
 
 
 @pytest.mark.parametrize("start", _STARTS, ids=lambda start: start.id)
@@ -247,24 +327,29 @@ def test_a_wrap_killed_anywhere_leaves_no_more_than_before_or_than_intended(
     harness, capsys, tmp_path_factory, start: _Start
 ) -> None:
     root, notes = harness["home"].parent, tmp_path_factory.mktemp("notes")
+    asked, typed = tuple(start.before), AS_READ * start.tools
     start.prepare(harness)
     files, files_before = saved(root), fingerprint(root)
     lock_before = lock_bytes(harness)
-    assert outcomes(harness, capsys) == start.before
+    assert outcomes(harness, capsys, asked) == start.before
 
     began = time.monotonic()
-    finished = run_gated(harness, notes, *start.flags, typed=AS_READS)
+    finished = run_gated(harness, notes, *start.flags, typed=typed)
     took = time.monotonic() - began
     assert finished.returncode == 0, finished.stderr
-    assert outcomes(harness, capsys) == start.intended
+    assert outcomes(harness, capsys, asked) == start.intended
+    order = re.findall(r"^  admitted  (\S+)$", finished.stdout, re.MULTILINE)
+    assert len(order) == start.tools and named(harness) == set(order), finished.stdout
 
     for kill in _kills(start, took):
         put_back(root, files)
         done = run_gated(
-            harness, notes, *start.flags, typed=AS_READS,
+            harness, notes, *start.flags, typed=typed,
             gate=kill.gate, after=kill.after, send=kill.send,
         )
         found = _assert_never_more(harness, capsys, start, kill, lock_before)
+        if kill.gate:
+            _assert_named_only_once_ratified(harness, kill, order)
         if kill.send != signal.SIGKILL:
             _assert_ended_as_reported(harness, start, kill, done, found, files_before)
         elif kill.gate or _SWEEP:

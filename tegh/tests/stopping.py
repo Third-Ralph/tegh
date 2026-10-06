@@ -7,7 +7,7 @@ the other wrap tests do not:
 - a wrap in a REAL process that can be held still at a named step, with no
   switch in product code (`run_gated`);
 - what a call to each tool gets afterwards, and under which definition it was
-  served (`outcomes`);
+  served (`outcomes`), beside which tools the manifest on disk names (`named`);
 - the project put back to an earlier state, store database included, so one
   setup serves many stops (`saved` and `put_back`).
 """
@@ -23,7 +23,9 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
+
+import yaml
 
 from tegh.cli import main
 from tegh.lockfile import lock_paths
@@ -33,15 +35,19 @@ from tegh.tests.wrapping import (
     V2,
     _wrap_process_env,
     description_file,
+    description_files,
     processes_naming,
+    store_of,
     wrap_argv,
 )
 
 ENTRY = '{"entry_id": "L-001"}'
 PAGE = '{"limit": 1}'
 GET_ENTRY, LIST_ENTRIES = "ledger/get_entry", "ledger/list_entries"
-#: Both toy tools corrected to reads, as typed at a terminal.
-AS_READS = "e\nread\n\ny\n" * 2
+_ARGS = {"get_entry": ENTRY, "list_entries": PAGE}
+#: One toy tool corrected to a read, as typed at a terminal; and both of them.
+AS_READ = "e\nread\n\ny\n"
+AS_READS = AS_READ * 2
 
 REFUSED = "refused"
 HELD = "held for approval"
@@ -190,7 +196,7 @@ def run_gated(
     pids = [int(pid) for pid in children.read_text().split()] if children.exists() else []
     _wait_for(lambda: not any(_alive(pid) for pid in pids), "the wrap's children ending")
     _wait_for(
-        lambda: processes_naming(description_file(harness)) == [], "the wrap's server ending"
+        lambda: processes_naming(*description_files(harness)) == [], "the wrap's server ending"
     )
     return Stopped(wrap.returncode, out, err)
 
@@ -213,35 +219,61 @@ def _call(harness: dict, capsys, tool: str, args: str) -> str:
     return HELD if HELD in text else REFUSED
 
 
-def outcomes(harness: dict, capsys) -> dict[tuple[str, str], str]:
-    """What a call to each tool gets, with the server advertising each description.
+#: What `outcomes` asks of the project every test here starts from: one server,
+#: whose `get_entry` is the tool with a description that changes.
+ASKED = ((GET_ENTRY, V1), (GET_ENTRY, V2), (LIST_ENTRIES, ""))
 
-    `get_entry` is asked twice, because whether it may run depends on which
-    definition the server gives at that moment, and a server can go back to
-    one it gave before. The description the server had is put back afterwards.
+
+def outcomes(
+    harness: dict, capsys, asked: Sequence[tuple[str, str]] = ASKED
+) -> dict[tuple[str, str], str]:
+    """What a call to each tool gets, with its server advertising each description.
+
+    Each of `asked` is a tool and the description its server is to advertise
+    for the call, or "" for a tool whose description never changes. A tool
+    whose description does change is asked under each one, because whether it
+    may run depends on which definition the server gives at that moment, and
+    a server can go back to one it gave before. The description a server had
+    is put back after each call.
     """
-    described = description_file(harness)
-    now = described.read_text(encoding="utf-8")
     found: dict[tuple[str, str], str] = {}
-    try:
-        for description in (V1, V2):
-            described.write_text(description, encoding="utf-8")
-            found[GET_ENTRY, description] = _call(harness, capsys, "ledger__get_entry", ENTRY)
-        found[LIST_ENTRIES, ""] = _call(harness, capsys, "ledger__list_entries", PAGE)
-    finally:
-        described.write_text(now, encoding="utf-8")
+    for coordinate, description in asked:
+        server, _, tool = coordinate.partition("/")
+        described = description_file(harness, server)
+        now = described.read_text(encoding="utf-8")
+        try:
+            if description:
+                described.write_text(description, encoding="utf-8")
+            found[coordinate, description] = _call(
+                harness, capsys, f"{server}__{tool}", _ARGS[tool]
+            )
+        finally:
+            described.write_text(now, encoding="utf-8")
     return found
 
 
-def pinned(lock: Optional[bytes]) -> set[str]:
-    """Every `get_entry` description the given tegh.lock bytes pin."""
+def pinned(lock: Optional[bytes], coordinate: str = GET_ENTRY) -> set[str]:
+    """Every description of one tool, `get_entry` by default, the tegh.lock bytes pin."""
     if lock is None:
         return set()
     return {
         tool["tool_def"]["description"]
         for server in json.loads(lock)["servers"]
         for tool in server["admitted"]
-        if tool["tool_def"]["tool_name"] == "get_entry"
+        if f"{server['server_id']}/{tool['tool_def']['tool_name']}" == coordinate
+    }
+
+
+def named(harness: dict) -> set[str]:
+    """Every tool the manifest on disk names: the ones a call can reach at all."""
+    manifest = store_of(harness).manifest_path(harness["project"])
+    if not manifest.exists():
+        return set()
+    servers = yaml.safe_load(manifest.read_text(encoding="utf-8")).get("mcp_servers") or {}
+    return {
+        f"{server_id}/{tool['tool_name']}"
+        for server_id, server in servers.items()
+        for tool in server.get("tools", ())
     }
 
 

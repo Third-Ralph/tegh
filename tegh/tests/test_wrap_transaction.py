@@ -47,10 +47,11 @@ from pathlib import Path
 from typing import Callable
 
 import pytest
+import yaml
 
 pytest.importorskip("mcp", reason="a real wrap snapshots a real MCP server")
 
-from tegh import interpose, transaction, unwrap  # noqa: E402
+from tegh import cli, interpose, transaction, unwrap  # noqa: E402
 from tegh.cli import _parse_args, main, wrap_command  # noqa: E402
 from tegh.lockfile import lock_paths  # noqa: E402
 from tegh.store import project_slug  # noqa: E402
@@ -335,6 +336,34 @@ def _a_credential_on_a_shadowed_server(scene: _Scene):
     return run_wrap(scene.harness, input="\n\n")
 
 
+def _manifest_out_of_order(scene: _Scene, written: str) -> list[str]:
+    """What is wrong with the manifest on disk at the moment something else is written.
+
+    Nothing, when it classifies both tools as confirmed and names neither.
+    The one a wrap writes for its review declares no classification at all,
+    and names no tool either; so it is the classifications that tell the two
+    apart, and "names no tool" alone would pass on the wrong one.
+    """
+    manifest = yaml.safe_load(
+        store_of(scene.harness).manifest_path(scene.harness["project"]).read_text(encoding="utf-8")
+    )
+    wrong = []
+    classified = sorted(f"{op['tool']}/{op['op']}" for op in manifest["tool_ops"])
+    if classified != ["ledger/get_entry", "ledger/list_entries"]:
+        wrong.append(
+            f"{written} before the manifest that carries the confirmed "
+            f"classifications: the one on disk classifies {classified or 'no tool'}"
+        )
+    named = sorted(
+        f"{server_id}/{tool['tool_name']}"
+        for server_id, server in manifest["mcp_servers"].items()
+        for tool in server.get("tools", ())
+    )
+    if named:
+        wrong.append(f"{written} beside a manifest that already names {named}")
+    return wrong
+
+
 def _after_the_config_is_rewritten(scene: _Scene, error: BaseException):
     """Stop a wrap with every file written and the commit point not yet reached.
 
@@ -342,15 +371,23 @@ def _after_the_config_is_rewritten(scene: _Scene, error: BaseException):
     the line after it. It is the one stop with the lock, the backup and the
     rewritten config all on disk, so it is what shows those three put back.
     """
-    write = interpose.write_interposition
+    write, write_lock = interpose.write_interposition, cli.write_lock
+    # Collected and asserted once the wrap has ended: an assertion raised
+    # inside a wrap is one more error for it to roll back and report.
+    out_of_order: list[str] = []
+
+    def _lock_after_the_manifest(*args, **kwargs) -> None:
+        # A wrap killed with the lock on disk must already be beside the
+        # confirmed manifest, the first of the files it writes.
+        out_of_order.extend(_manifest_out_of_order(scene, "the lock was written"))
+        write_lock(*args, **kwargs)
 
     def _write_then_stop(plan) -> None:
         # The order a killed wrap is recovered by: the lock and the backup are
         # on disk before the first byte of the config changes, beside a
         # manifest that names no tool.
         project = scene.harness["project"]
-        manifest = store_of(scene.harness).manifest_path(project).read_text(encoding="utf-8")
-        assert "tool_ops:" in manifest and "tool_name" not in manifest, manifest
+        out_of_order.extend(_manifest_out_of_order(scene, "the config was written"))
         assert lock_paths(project)[0].exists(), "the config was written before the lock"
         assert store_of(scene.harness).backup_path(project).exists(), (
             "the config was written before the backup of what it held"
@@ -360,9 +397,12 @@ def _after_the_config_is_rewritten(scene: _Scene, error: BaseException):
         assert b'"tegh"' in scene.harness["claude_json"].read_bytes()
         raise error
 
+    scene.monkeypatch.setattr(cli, "write_lock", _lock_after_the_manifest)
     scene.monkeypatch.setattr(interpose, "write_interposition", _write_then_stop)
     scene.begin()
-    return scene.in_process("--admit-all", answers=[""])
+    done = scene.in_process("--admit-all", answers=[""])
+    assert not out_of_order, "; ".join(out_of_order)
+    return done
 
 
 def _an_error_after_the_config_is_rewritten(scene: _Scene):
