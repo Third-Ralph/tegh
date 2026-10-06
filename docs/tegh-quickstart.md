@@ -105,6 +105,12 @@ authority** — the tool namespace and the activation rows live here, deliberate
 project tree**, which is what keeps `tegh.lock` a projection rather than something an agent with
 write access to your repo could forge (`docs/tegh-lock.md`, TL1).
 
+The keys are the machine's. Everything else is kept per project, in a directory of its own under
+`~/.tegh/projects/` that the first wrap creates: the manifest, the store database (`store.db`)
+holding that project's admissions and grants, the credential map and the audit tape. Two projects
+that each name a server `github` are reviewed separately and admitted separately, and neither
+project's gateway reads the other's database.
+
 ## 4. Wrap
 
 ```bash
@@ -206,7 +212,7 @@ PROPOSING (maker; nothing is admitted until the checker ratifies)
 ==============================================================================
 ADMITTING (checker ratifies, one tool at a time)
 ==============================================================================
-  grants issued for the admitted coordinates (store: /Users/you/.tegh/tegh.db)
+  grants issued for the admitted coordinates (store: /Users/you/.tegh/projects/tegh-demo-7f74e45c2bca/store.db)
   admitted  memory/create_entities
   admitted  memory/open_nodes
   admitted  memory/read_graph
@@ -325,7 +331,7 @@ You get the stored call to look at before you agree to it, and then it runs:
 
 ```
 [broker] envelope load mode: manifest
-[broker] store backend: sqlite (/Users/you/.tegh/tegh.db)
+[broker] store backend: sqlite (/Users/you/.tegh/projects/tegh-demo-7f74e45c2bca/store.db)
 [broker] audit sink: file (/Users/you/.tegh/projects/tegh-demo-7f74e45c2bca/audit.jsonl); secrets: file (/Users/you/.tegh/projects/tegh-demo-7f74e45c2bca/secrets.json)
 [broker] grant load mode: read
 
@@ -535,7 +541,7 @@ tegh unwrap will change, for /Users/you/tegh-demo:
 
 It leaves untouched:
 
-  tegh.lock and the admitted rows, so re-wrapping does not re-run the ceremony
+  tegh.lock and the admitted rows
   the audit tape at /Users/you/.tegh/projects/tegh-demo-7f74e45c2bca/audit.jsonl
 
 Quit the coding agent in this project before you proceed: a session that is still running can rewrite its config from memory after the restore.
@@ -544,13 +550,13 @@ Proceed? [Y/n] y
   restored  local:/Users/you/tegh-demo-home/.claude.json  (memory)
   removed   tegh's wrap backup at /Users/you/.tegh/projects/tegh-demo-7f74e45c2bca/wrap-backup.json
 
-unwrapped /Users/you/tegh-demo (wrapped 2026-10-04T15:11:54.699203+00:00). The harness reaches its original servers directly again. tegh.lock, the admitted rows and the audit tape are untouched, so re-wrapping does not re-run the ceremony.
+unwrapped /Users/you/tegh-demo (wrapped 2026-10-04T15:11:54.699203+00:00). The harness reaches its original servers directly again. tegh.lock, the admitted rows and the audit tape are untouched.
 ```
 
 Restores the displaced config **byte-for-byte**, with the permission bits the file already had.
 
-The closing line says re-wrapping does not re-run the ceremony. As of 0.1.1 a second `tegh wrap`
-does ask the tool review again, for every tool (#13). It remembers only the values you classified as
+Leaving the admitted rows in place does not shorten the next wrap. As of 0.1.1 a second `tegh wrap`
+asks the tool review again, for every tool (#13). It remembers only the values you classified as
 configuration.
 Only the files the unwrap really changes are listed: this project had no `.mcp.json` and no
 user-scope servers, so neither appears.
@@ -580,6 +586,33 @@ works from what is on disk, including after an unwrap that was killed.
 From a script, where nobody can answer, pass `--yes`. Without it, the prompt needs a terminal on
 both stdin and stdout: a piped answer, or `tegh unwrap > out.txt` with the plan going into a file
 nobody is reading, is refused and nothing is changed.
+
+## A project wrapped by an earlier version
+
+Earlier versions of tegh kept one store database for every project, at `~/.tegh/tegh.db`. Admitted
+tools are keyed by server name and tool name, so two projects that named a server identically
+shared one admission for each of its tools, and wrapping the second replaced what the first had
+admitted. This version keeps a database per project and does not read the old file. A row in it
+cannot say which project's review produced it, so nothing is copied out of it.
+
+A project wrapped under the old layout is therefore not served. `tegh gateway`, `tegh call`,
+`tegh approve` and `tegh diff` refuse for it and name the two commands that put it right, and
+`tegh status` and `tegh posture` report the same thing beside what they normally print:
+
+```bash
+tegh unwrap --project "$(pwd)"
+tegh wrap claude --project "$(pwd)"
+```
+
+The unwrap puts your own servers back in the harness config, exactly as §9 describes, and the wrap
+reviews and admits them again into the project's own database. For such a project the unwrap's
+plan and report say that what was admitted is in a database this version does not read, and the
+report ends by naming the wrap command. A project wrapped with
+`--no-rewrite` has no backup to unwrap from and needs only the wrap. `tegh audit` still reads the
+project's tape, which was always per project.
+
+tegh leaves `~/.tegh/tegh.db` where it is and never opens it. Once every project you care about has
+been wrapped again, nothing uses that file and you can delete it yourself.
 
 ---
 
