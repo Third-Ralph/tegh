@@ -208,7 +208,10 @@ def init_command(args: argparse.Namespace) -> int:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 2
     print(f"tegh home provisioned: {store.home}")
-    print(f"  store database   {store.db_path} (created on first admission)")
+    print(
+        f"  store databases  {store.home / 'projects'}/<project>/store.db "
+        "(one per wrapped project, created by its first wrap)"
+    )
     print(f"  HMAC key         {store.hmac_key_path} (0600)")
     print(f"  issuer key       {store.issuer_key_path} (0600)")
     print(f"  issuer key_id    {store.issuer_key_id()}")
@@ -1557,6 +1560,7 @@ def wrap_command(args: argparse.Namespace, *, prompt: Prompt = _ask) -> int:
         store.config_decisions_path(project),
         store.secrets_path(project),
         store.manifest_path(project),
+        store.layout_path(project),
         *(store.snapshot_path(project, server.server_id) for server in lockable),
         lock_path,
         signature_path,
@@ -1648,6 +1652,12 @@ def _prepare_wrap(
             credentials_by_server=decisions.credentials_by_server,
         ),
     )
+    # From here the manifest is this wrap's, written for a database of this
+    # project's own, and the marker says so (`store.py`, "The layout marker").
+    # Before the first ceremony, which refuses a manifest that has none. Both
+    # files are recorded, so a rollback takes the marker away again together
+    # with whatever manifest it puts back.
+    store.mark_layout(project)
 
     confirmed: dict[str, list[tuple[McpToolDef, ToolOp]]] = {}
     reachable: list[DiscoveredServer] = []
@@ -1960,7 +1970,9 @@ def _seed_grants(transaction: WrapTransaction, store: TeghStore, project: Path) 
         raise _ceremony_failed(
             "issuing grants for this project's admitted tools", seed.stdout + seed.stderr
         )
-    print(f"  grants issued for the admitted coordinates (store: {store.db_path})")
+    print(
+        f"  grants issued for the admitted coordinates (store: {store.db_path(project)})"
+    )
 
 
 def _admit_committed(
@@ -2255,6 +2267,12 @@ def status_command(args: argparse.Namespace) -> int:
                 f"reversible={str(op.reversible).lower():<5} "
                 f"[{tool.attestation.kind.value} by {tool.attestation.admitted_by}]"
             )
+    # The lock is a projection and this command reads nothing else, so it
+    # would print the pins of a project tegh serves nothing for and say no
+    # more. Said last, where it is read; the status is still the lock's.
+    earlier_layout = store.layout_refusal(project)
+    if earlier_layout is not None:
+        print(f"\nNOT SERVED: {earlier_layout}")
     return 0
 
 
@@ -2293,12 +2311,14 @@ def diff_command(args: argparse.Namespace) -> int:
         print(f"No tegh.lock in {project} — this project is not wrapped.")
         return 1
 
+    # Before anything is printed: this refuses a project wrapped under an
+    # earlier store layout, and a refusal should be the only thing said.
+    env = store.ceremony_env(role="maker", project=project)
     # Drift is judged against the PINNED definitions, so whether those bytes are
     # the ones a human signed is a precondition for reading the diff at all —
     # printed here rather than left to `status`, which a `diff` user has no
     # reason to have run.
     print(f"lock signature: {_signature_line(loaded)}\n")
-    env = store.ceremony_env(role="maker", project=project)
     drifted = 0
     withdrawn = 0
     unchanged = 0

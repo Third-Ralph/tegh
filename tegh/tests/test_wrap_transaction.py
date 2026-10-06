@@ -95,8 +95,8 @@ def _may_differ(harness: dict) -> dict[str, str]:
     """The files a rolled-back wrap may leave changed, each with why."""
     slug = project_slug(harness["project"])
     return {
-        "tegh/tegh.db": (
-            "the store database: the proposals a stopped wrap made and withdrew "
+        f"tegh/projects/{slug}/store.db": (
+            "the project's store database: the proposals a stopped wrap made and withdrew "
             "stay in it as history, and a rollback does not rewrite it"
         ),
         f"tegh/projects/{slug}/audit.jsonl": (

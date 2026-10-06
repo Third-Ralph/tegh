@@ -295,7 +295,7 @@ class TestCeremonyEnvironment:
         store = provision(tmp_path / "home")
         env = store.ceremony_env(role="maker", project=tmp_path / "proj")
         assert env["BROKER_STORE"] == "sqlite"
-        assert env["BROKER_SQLITE_PATH"] == str(store.db_path)
+        assert env["BROKER_SQLITE_PATH"] == str(store.db_path(tmp_path / "proj"))
         assert env["BROKER_HMAC_KEY"] == store.hmac_key()
         assert env["BROKER_LOCAL_IDENTITY"] == "maker"
         assert env["ISSUER_SIGNING_KEY_FILE"] == str(store.issuer_key_path)
@@ -315,6 +315,196 @@ _BROKER_ENVIRONMENTS = {
     "ceremony": lambda store, project: store.ceremony_env(role="maker", project=project),
     "gateway": lambda store, project: store.gateway_env(project=project),
 }
+
+
+def _as_wrapped(
+    store: TeghStore, project: Path, *, marker: str | None, backup: bool = False
+) -> None:
+    """The files of a project's directory that `layout_refusal` reads, and no wrap.
+
+    `marker=None` is what a tegh with one database per home left: a manifest
+    and no marker beside it.
+    """
+    store.manifest_path(project).parent.mkdir(parents=True, exist_ok=True)
+    store.manifest_path(project).write_text("principal: {}\n", encoding="utf-8")
+    if marker is not None:
+        store.layout_path(project).write_text(marker, encoding="utf-8")
+    if backup:
+        store.backup_path(project).write_text("{}", encoding="utf-8")
+
+
+def _an_unreadable_marker(store: TeghStore, project: Path) -> None:
+    """Put a directory where the marker goes: there, and no reader gets bytes from it.
+
+    A directory and not a file of mode 000, which root reads anyway.
+    """
+    store.layout_path(project).mkdir()
+
+
+@pytest.mark.parametrize("environment", sorted(_BROKER_ENVIRONMENTS))
+class TestOneDatabasePerProject:
+    """The only database path either environment names is the project's own.
+
+    The base keys an admitted tool by server name and tool name, so the file is
+    the namespace: two projects in one file share every admission of a server
+    they both name.
+    """
+
+    def test_two_projects_are_given_two_databases(
+        self, tmp_path: Path, environment: str
+    ) -> None:
+        store = provision(tmp_path / "home")
+        build = _BROKER_ENVIRONMENTS[environment]
+        first = build(store, tmp_path / "first")["BROKER_SQLITE_PATH"]
+        second = build(store, tmp_path / "second")["BROKER_SQLITE_PATH"]
+
+        assert first == str(store.db_path(tmp_path / "first"))
+        assert second == str(store.db_path(tmp_path / "second"))
+        assert first != second
+        assert Path(first).parent == store.project_dir(tmp_path / "first")
+
+    def test_the_grant_space_is_not_named_apart(
+        self, tmp_path: Path, environment: str
+    ) -> None:
+        """Unnamed, the base keeps grants in the database `BROKER_SQLITE_PATH`
+        names. Naming a second file here would be the way grants came to be
+        shared between projects while admissions were not."""
+        store = provision(tmp_path / "home")
+        env = _BROKER_ENVIRONMENTS[environment](store, tmp_path / "proj")
+        assert "BROKER_SQLITE_GRANTS_PATH" not in env
+
+    def test_the_database_of_the_earlier_layout_is_named_nowhere(
+        self, tmp_path: Path, environment: str
+    ) -> None:
+        store = provision(tmp_path / "home")
+        env = _BROKER_ENVIRONMENTS[environment](store, tmp_path / "proj")
+        assert store.shared_db_path == store.home / "tegh.db"
+        assert not [name for name, value in env.items() if str(store.shared_db_path) in value]
+
+    def test_none_is_built_for_a_project_of_the_earlier_layout(
+        self, tmp_path: Path, environment: str
+    ) -> None:
+        """Building one is what would let the base create this project's
+        database, empty, and serve from it. Refused before anything is written:
+        the credential map both environments otherwise create is not there."""
+        store = provision(tmp_path / "home")
+        project = tmp_path / "proj"
+        _as_wrapped(store, project, marker=None)
+
+        with pytest.raises(TeghStoreError, match="earlier version of tegh"):
+            _BROKER_ENVIRONMENTS[environment](store, project)
+        assert sorted(p.name for p in store.project_dir(project).iterdir()) == ["manifest.yaml"]
+
+    def test_none_is_built_for_a_project_whose_marker_cannot_be_read(
+        self, tmp_path: Path, environment: str
+    ) -> None:
+        """A marker that cannot be read says nothing about the layout, and
+        nothing is served on that. Refused before anything is written, as for
+        the earlier layout."""
+        store = provision(tmp_path / "home")
+        project = tmp_path / "proj"
+        _as_wrapped(store, project, marker=None)
+        _an_unreadable_marker(store, project)
+
+        with pytest.raises(TeghStoreError, match="could not be read"):
+            _BROKER_ENVIRONMENTS[environment](store, project)
+        assert sorted(p.name for p in store.project_dir(project).iterdir()) == [
+            "layout", "manifest.yaml",
+        ]
+
+    def test_one_is_built_once_the_marker_is_written(
+        self, tmp_path: Path, environment: str
+    ) -> None:
+        store = provision(tmp_path / "home")
+        project = tmp_path / "proj"
+        _as_wrapped(store, project, marker=None)
+        store.mark_layout(project)
+        assert _BROKER_ENVIRONMENTS[environment](store, project)["BROKER_SQLITE_PATH"]
+
+
+class TestLayoutRefusal:
+    """Which projects are refused for the layout they were wrapped under, and how."""
+
+    def test_a_project_that_was_never_wrapped_is_not_this_refusal(self, tmp_path: Path) -> None:
+        store = provision(tmp_path / "home")
+        assert store.layout_refusal(tmp_path / "proj") is None
+
+    def test_a_project_of_this_layout_is_not_refused(self, tmp_path: Path) -> None:
+        store = provision(tmp_path / "home")
+        _as_wrapped(store, tmp_path / "proj", marker="2\n")
+        assert store.layout_refusal(tmp_path / "proj") is None
+
+    def test_an_old_database_in_the_home_refuses_nothing_by_being_there(
+        self, tmp_path: Path
+    ) -> None:
+        store = provision(tmp_path / "home")
+        store.shared_db_path.write_bytes(b"left by an earlier tegh")
+        _as_wrapped(store, tmp_path / "proj", marker="2\n")
+        assert store.layout_refusal(tmp_path / "never-wrapped") is None
+        assert store.layout_refusal(tmp_path / "proj") is None
+
+    @pytest.mark.parametrize(
+        ("marker", "backup", "says", "does_not_say"),
+        [
+            pytest.param(
+                None, True, ("earlier version of tegh", "to put your own servers back"),
+                "left no backup", id="earlier-layout-with-a-backup",
+            ),
+            pytest.param(
+                None, False, ("earlier version of tegh", "left no backup"),
+                "to put your own servers back", id="earlier-layout-never-rewritten",
+            ),
+            pytest.param(
+                "3\n", True, ("store layout as '3'", "different version of tegh"),
+                "earlier version", id="a-layout-this-tegh-does-not-know",
+            ),
+            pytest.param(
+                "", False, ("store layout as ''",), "earlier version", id="an-empty-marker",
+            ),
+        ],
+    )
+    def test_the_refusal_names_both_commands(
+        self, tmp_path: Path, marker, backup, says, does_not_say
+    ) -> None:
+        store = provision(tmp_path / "home")
+        project = tmp_path / "a project"  # the space is what the quoting is for
+        _as_wrapped(store, project, marker=marker, backup=backup)
+
+        refusal = store.layout_refusal(project)
+
+        assert refusal is not None
+        for phrase in says:
+            assert phrase in refusal, refusal
+        assert does_not_say not in refusal, refusal
+        where = f"--project '{project}' --home {store.home}"
+        assert f"`tegh unwrap {where}`" in refusal or "`tegh unwrap` has nothing" in refusal
+        assert f"`tegh wrap claude {where}`" in refusal, refusal
+        with pytest.raises(TeghStoreError) as raised:
+            store.require_layout(project)
+        assert str(raised.value) == refusal
+
+    @pytest.mark.parametrize("backup", [True, False], ids=["with-a-backup", "never-rewritten"])
+    def test_a_marker_that_cannot_be_read_is_refused_and_not_guessed_at(
+        self, tmp_path: Path, backup: bool
+    ) -> None:
+        """Neither "this layout" nor "the earlier one": tegh cannot tell, and says that.
+
+        Answering None here would serve the project, and answering as for a
+        missing marker would tell its owner an earlier tegh wrapped it. The
+        refusal names the file that could not be read and why.
+        """
+        store = provision(tmp_path / "home")
+        project = tmp_path / "proj"
+        _as_wrapped(store, project, marker=None, backup=backup)
+        _an_unreadable_marker(store, project)
+
+        for ask in (store.layout_refusal, store.require_layout):
+            with pytest.raises(TeghStoreError) as raised:
+                ask(project)
+            said = str(raised.value)
+            assert f"{store.layout_path(project)} could not be read" in said, said
+            assert "cannot tell which store layout" in said, said
+            assert "earlier version of tegh" not in said, said
 
 #: What a shell can export that neither environment names. The base reads every
 #: `BROKER_*` and signing name here; the last three are not the base's, and are
