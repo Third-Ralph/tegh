@@ -6,9 +6,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tegh"
-# The first release. The only `tegh` published before it is the name-claim placeholder at 0.0.0,
-# which ships no module. Nothing in the code states the version; it lives here alone.
-version = "0.1.1"
+# Nothing in the code states the version; it lives here alone. 0.2.0 keeps one store database per
+# project, so a project wrapped by 0.1.1 has to be unwrapped and wrapped again.
+version = "0.2.0"
 description = "tegh — pin the MCP tools a coding agent uses behind the safe-agents broker, with no AWS account."
 readme = "README.md"
 # Apache-2.0, copyright Wes Jackson [ruling: maintainer, 2026-09-25]. The platform tegh depends on is
