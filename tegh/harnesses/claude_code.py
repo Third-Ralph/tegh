@@ -103,7 +103,7 @@ from tegh.posture import PostureLine
 DURABILITY = PostureLine(
     claim="Whether a wrapped Claude Code agent can undo its own wrap is UNRESOLVED",
     holds="unknown",
-    source="docs/references/harnesses/claude-code.md:368-405, 462-476 "
+    source="docs/references/harnesses/claude-code.md:755-803, 860-874 "
     "(the vendor's permission-modes page for the first range; the second records a "
     "statement with no vendor source)",
     detail=".mcp.json and .claude.json are hard-coded protected paths evaluated BEFORE "
@@ -113,7 +113,7 @@ DURABILITY = PostureLine(
     "under bypassPermissions. Crucially the docs never say which TOOLS the gate covers, "
     "while the reference records, with no vendor source, that `claude mcp remove` from a "
     "shell is ungated — the agent has a shell. All of this is a documentation claim: no command was run against a running "
-    "binary when the documentation was read [claude-code.md:543-547]",
+    "binary when the documentation was read [claude-code.md:963-967]",
 )
 
 #: Which member of the format's one closed catalog this adapter speaks for
