@@ -7,8 +7,9 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "tegh"
 # Nothing in the code states the version; it lives here alone. 0.2.0 keeps one store database per
-# project, so a project wrapped by 0.1.1 has to be unwrapped and wrapped again.
-version = "0.2.0"
+# project, so a project wrapped by 0.1.1 has to be unwrapped and wrapped again. 0.3.0 adds the
+# PostToolUse hook that reports a wrapped agent's own tool calls to the broker.
+version = "0.3.0"
 description = "tegh — pin the MCP tools a coding agent uses behind the safe-agents broker, with no AWS account."
 readme = "README.md"
 # Apache-2.0, copyright Wes Jackson [ruling: maintainer, 2026-09-25]. The platform tegh depends on is
