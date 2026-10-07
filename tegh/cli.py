@@ -1,10 +1,11 @@
 """The `tegh` command — pin the MCP tools a coding project already uses.
 
-Ten subcommands, and a deliberate division of labour with the base:
+Eleven subcommands, and a deliberate division of labour with the base:
 
   init     mint this machine's tegh home (HMAC key, local issuer signing key)
   wrap     discover -> snapshot -> review -> propose -> tegh.lock -> interpose -> admit
   gateway  run the broker's MCP mouth for one wrapped project (what the harness spawns)
+  hook     report one built-in tool call to that gateway, after it ran (what the harness's hook runs)
   call     drive one tool call through the gateway as the wrapped principal (`call.py`)
   approve  release a call the broker is holding (the local arm of the platform's owner-approval seam)
   audit    show this project's tape and where it lives; --verify checks the chain
@@ -69,6 +70,7 @@ from tegh.discovery import (
 from tegh import interpose
 from tegh import unwrap
 from tegh.harnesses import claude_code
+from tegh.hook import hook_main, mouth_is_listening
 from tegh.launch import (
     BROKER_INHERITED_ENV_VARS,
     DEFAULT_CALL_TIMEOUT_SECONDS,
@@ -2061,7 +2063,7 @@ def _admit_committed(
 
 
 def gateway_command(args: argparse.Namespace) -> int:
-    """Run the broker's MCP mouth for one wrapped project.
+    """Run the broker's MCP mouth for one wrapped project, and its tool-event mouth.
 
     This is what the harness spawns. It is deliberately a THIN launcher: it
     resolves the tegh home, builds the environment, and execs the base's
@@ -2071,6 +2073,10 @@ def gateway_command(args: argparse.Namespace) -> int:
 
     **stdout belongs to the MCP protocol** (GATEWAY.md G8), so this function
     prints nothing on success; diagnostics go to stderr.
+
+    Beside the stdio surface the gateway opens the base's tool-event mouth on a
+    loopback port, where `tegh hook` reports the calls the harness's built-in
+    tools made (`TeghStore.gateway_env`). It observes them and gates none.
     """
     project = Path(args.project).expanduser().resolve()
     store = TeghStore(home=Path(args.home).expanduser() if args.home else tegh_home())
@@ -2085,8 +2091,26 @@ def gateway_command(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    # The tool-event mouth's address file belongs to ONE gateway per project:
+    # the one the session's hooks report to. Another gateway for the same
+    # project (`tegh call`, or a harness listing the server's tools) opens no
+    # mouth while that one answers, so it cannot take the file over and leave
+    # the hooks posting to a port that closes when it exits. A file nothing
+    # answers at is a gateway that has gone, and is removed before this one
+    # writes its own.
+    addr_file = store.event_mouth_addr_path(project)
+    mouth_taken = mouth_is_listening(addr_file)
+    if mouth_taken:
+        print(
+            "[tegh] another gateway for this project holds the tool-event mouth "
+            f"({addr_file}); this one opens none, so built-in tool reports keep "
+            "going to that one",
+            file=sys.stderr,
+        )
     try:
-        env = store.gateway_env(project=project)
+        env = store.gateway_env(project=project, event_mouth=not mouth_taken)
+        if not mouth_taken:
+            addr_file.unlink(missing_ok=True)
     except TeghStoreError as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 2
@@ -2465,6 +2489,22 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     with_project(gateway)
     with_home(gateway)
 
+    # Listed for --help. `main` dispatches `hook` before this parser runs, so
+    # these flags are documentation; `hook.py` parses its own.
+    hook = sub.add_parser(
+        "hook",
+        help="report one Claude Code PostToolUse event to the gateway (what the hook runs)",
+        description=(
+            "Read ONE Claude Code PostToolUse hook event on stdin, classify the "
+            "built-in tool call it describes, and report the classification and "
+            "digests to this project's running gateway. It observes and gates "
+            "nothing: it always exits 0 and prints nothing on stdout, and when the "
+            "report cannot be made it says so in one line on stderr."
+        ),
+    )
+    with_project(hook)
+    with_home(hook)
+
     call = sub.add_parser(
         "call",
         help="drive one tool call through the gateway and print the broker's answer",
@@ -2592,7 +2632,13 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 
 
 def main(argv: Optional[list[str]] = None) -> int:
-    args = _parse_args(argv)
+    words = sys.argv[1:] if argv is None else list(argv)
+    if words[:1] == ["hook"]:
+        # Before argparse, which answers a malformed command line with exit 2:
+        # for a `PostToolUse` hook that puts its stderr in front of the model.
+        # `tegh hook` parses its own two flags and always exits 0 (`hook.py`).
+        return hook_main(words[1:])
+    args = _parse_args(words)
     try:
         if args.command == "init":
             return init_command(args)
