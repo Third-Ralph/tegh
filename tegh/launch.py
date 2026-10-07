@@ -13,6 +13,9 @@ is invoked reaches the written config and `tegh call` together. Two spellings of
 one command is how the one a test drives stops being the one a user's harness
 runs.
 
+The harness's `PostToolUse` hook is the third command tegh writes into a harness
+config, and `hook_argv` beside it is built the same way for the same reason.
+
 This module imports nothing from the base and nothing from the rest of tegh. It
 is plumbing that `cli.py`, the harness adapters and `call.py` all stand on, and
 anything it imported would be an import cycle waiting for one of them.
@@ -21,6 +24,7 @@ anything it imported would be an import cycle waiting for one of them.
 from __future__ import annotations
 
 import os
+import shlex
 import sys
 from pathlib import Path
 from typing import Mapping, Optional, Sequence
@@ -173,6 +177,64 @@ def gateway_argv(
     ]
 
 
+def hook_argv(project: Path | str, *, launcher: Sequence[str], home: Path | str) -> list[str]:
+    """The full command line of `tegh hook` for one wrapped project.
+
+    The dual of `gateway_argv`, for the harness's `PostToolUse` hook instead of
+    its MCP config: the same launcher, and the project and the tegh home named
+    explicitly and absolutely, for the reason `gateway_argv` gives. A harness
+    runs a hook command with an environment tegh does not build, so nothing the
+    hook needs to find the gateway's mouth may come from that environment.
+    """
+    if not launcher:
+        raise ValueError("the hook command needs a launcher argv")
+    return [
+        *launcher,
+        "hook",
+        "--project",
+        str(Path(project).expanduser().resolve()),
+        "--home",
+        str(Path(home).expanduser().resolve()),
+    ]
+
+
+def hook_command(project: Path | str, *, launcher: Sequence[str], home: Path | str) -> str:
+    """`hook_argv` as the one shell string a harness's command hook carries.
+
+    Quoted for a POSIX shell, which is how Claude Code runs a `command` hook. A
+    project path with a space in it is one word after quoting, and the string
+    reads back into the same argv through `shlex.split` (`hook_home_in`).
+    """
+    return shlex.join(hook_argv(project, launcher=launcher, home=home))
+
+
+def _home_in(argv: Sequence[str], *, subcommand: str, project: Path | str) -> Optional[str]:
+    """The tegh home of an argv that ends `<subcommand> --project P --home H`."""
+    if len(argv) < 6:  # five words, after at least one of launcher
+        return None
+    named_subcommand, project_flag, named_project, home_flag, home = argv[-5:]
+    if (named_subcommand, project_flag, home_flag) != (subcommand, "--project", "--home"):
+        return None
+    if named_project != str(Path(project).expanduser().resolve()):
+        return None
+    return home
+
+
+def hook_home_in(command: str, *, project: Path | str) -> Optional[str]:
+    """The tegh home a hook `command` string reports `project`'s events to, or None.
+
+    The reading of what `hook_command` writes, as `gateway_home_in` is of
+    `gateway_argv`, and for the same purpose: recognising the entry tegh wrote
+    by what it runs. The launcher is not compared, for the reason given there.
+    A string the shell would not split is not tegh's.
+    """
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return None
+    return _home_in(argv, subcommand="hook", project=project)
+
+
 def gateway_home_in(argv: Sequence[str], *, project: Path | str) -> Optional[str]:
     """The tegh home `argv` runs `project`'s gateway from, or None if it does not.
 
@@ -189,14 +251,7 @@ def gateway_home_in(argv: Sequence[str], *, project: Path | str) -> Optional[str
     The home is returned and not compared. A project wrapped from another tegh
     home is wrapped all the same, and the caller needs the home to say where.
     """
-    if len(argv) < 6:  # five words of `gateway_argv`, after at least one of launcher
-        return None
-    subcommand, project_flag, named_project, home_flag, home = argv[-5:]
-    if (subcommand, project_flag, home_flag) != ("gateway", "--project", "--home"):
-        return None
-    if named_project != str(Path(project).expanduser().resolve()):
-        return None
-    return home
+    return _home_in(argv, subcommand="gateway", project=project)
 
 
 def inherited_env(
