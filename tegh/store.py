@@ -86,6 +86,25 @@ a manifest names a bare LEAF by ruling, and the deploying topology supplies
 the scope (`docs/config-provenance.md` § "Secret naming — the leaf rule").
 Locally the per-project directory plays the topology's part, so the leaf is the
 bare `server_id` — see :meth:`TeghStore.secrets_path`.
+
+## The tool-event mouth's two files
+
+Beside a project's manifest, `tegh gateway` keeps two files for the mouth where
+the harness's `PostToolUse` hook reports the calls its built-in tools made
+(`tegh hook`; the platform's `broker/GATEWAY.md`, G21 on):
+
+- ``gateway-token``, the launch token the mouth authenticates a report by
+  (`BROKER_GATEWAY_TOKEN_FILE`). `tegh gateway` creates it, 0600, the first time
+  it starts for a project, and never replaces it. The hook reads it to report;
+  nothing else does.
+- ``event-mouth.addr``, where the running gateway's mouth listens, as
+  ``host:port`` and a newline (`BROKER_EVENT_MOUTH_ADDR_FILE`). The gateway
+  writes it once it is bound; tegh only reads it, and removes one that no
+  gateway answers at before it starts the next.
+
+Neither is authority over what is callable. The token lets a holder report a
+call, and a report can add taint and nothing else, so the most a stolen token
+buys is approvals the agent's writes did not need.
 """
 
 from __future__ import annotations
@@ -119,7 +138,16 @@ _HMAC_NAME = "hmac.key"
 _ISSUER_KEY_NAME = "issuer.pem"
 _ISSUER_PUB_NAME = "issuer.pub"
 _SECRETS_NAME = "secrets.json"
+_GATEWAY_TOKEN_NAME = "gateway-token"
+_EVENT_MOUTH_ADDR_NAME = "event-mouth.addr"
 _OWNER_ONLY = 0o600
+
+#: The authenticator the gateway's mouths are opened with: a member of the
+#: base's closed catalog, named, never an import path (GATEWAY.md G13, G14).
+GATEWAY_AUTHENTICATOR = "launch_token"
+#: Bytes of entropy in a launch token. `token_urlsafe` spells 48 bytes as 64
+#: characters of the RFC 6750 b64token alphabet; the base requires 32 or more.
+_GATEWAY_TOKEN_BYTES = 48
 
 
 class TeghStoreError(RuntimeError):
@@ -460,6 +488,32 @@ class TeghStore:
             tmp.unlink(missing_ok=True)
             raise
 
+    def gateway_token_path(self, project: Path | str) -> Path:
+        """The launch token this project's gateway authenticates hook reports by."""
+        return self.project_dir(project) / _GATEWAY_TOKEN_NAME
+
+    def event_mouth_addr_path(self, project: Path | str) -> Path:
+        """Where this project's running gateway says its tool-event mouth listens."""
+        return self.project_dir(project) / _EVENT_MOUTH_ADDR_NAME
+
+    def ensure_gateway_token(self, project: Path | str) -> Path:
+        """Create this project's launch token if there is none; never replace one.
+
+        Under `_write_secret`'s discipline: 0600 from creation, and refused rather
+        than overwritten. Two gateways starting at once can both find it absent;
+        the one that loses the race finds the winner's file, which is the same
+        outcome, so that refusal is not passed on.
+        """
+        path = self.gateway_token_path(project)
+        if path.exists():
+            return path
+        try:
+            _write_secret(path, secrets.token_urlsafe(_GATEWAY_TOKEN_BYTES) + "\n")
+        except (TeghStoreError, FileExistsError):
+            if not path.exists():
+                raise
+        return path
+
     @property
     def is_provisioned(self) -> bool:
         return self.hmac_key_path.exists() and self.issuer_key_path.exists()
@@ -578,7 +632,9 @@ class TeghStore:
         )
         return environment
 
-    def gateway_env(self, *, project: Path | str) -> dict[str, str]:
+    def gateway_env(
+        self, *, project: Path | str, event_mouth: bool = True
+    ) -> dict[str, str]:
         """The environment `tegh gateway` runs the broker's MCP mouth under.
 
         **This is why the harness config holds no secrets.** The entry written
@@ -612,6 +668,18 @@ class TeghStore:
         (`layout_refusal`), as `ceremony_env` does. A gateway started for one
         would open a new database with no admission in it and answer every
         call as if the tool had never been admitted.
+
+        **The tool-event mouth.** With `event_mouth` (the default) the gateway
+        also opens the base's tool-event mouth on a free loopback port and
+        writes where to `event_mouth_addr_path`, which is how `tegh hook` finds
+        it. The mouth observes: a report of a built-in tool call lands on the
+        tape and a reported read can taint the turn, and nothing it receives is
+        a request for anything. It authenticates by the launch token, named by
+        FILE (`ensure_gateway_token`) and never by value, because every child
+        the broker spawns for a connector inherits this environment. The
+        authenticator and the token file are named even when the mouth stays
+        shut, which the stdio gateway ignores. The mouth's host is never named,
+        so it binds the base's default, loopback.
         """
         self.require_layout(project)
         environment = inherited_env(BROKER_INHERITED_ENV_VARS)
@@ -625,8 +693,17 @@ class TeghStore:
                 "BROKER_AUDIT_PATH": str(self.audit_path(project)),
                 "BROKER_SECRETS": "file",
                 "BROKER_SECRETS_FILE": str(self.ensure_secrets_file(project)),
+                "BROKER_GATEWAY_AUTH": GATEWAY_AUTHENTICATOR,
+                "BROKER_GATEWAY_TOKEN_FILE": str(self.ensure_gateway_token(project)),
             }
         )
+        if event_mouth:
+            environment.update(
+                {
+                    "BROKER_EVENT_MOUTH_PORT": "0",
+                    "BROKER_EVENT_MOUTH_ADDR_FILE": str(self.event_mouth_addr_path(project)),
+                }
+            )
         # The secrets arm is NAMED because the base refuses a durable store paired
         # with fake credentials AT BOOT: leaving it unset does not defer the
         # question, it prevents the gateway from starting. This file
