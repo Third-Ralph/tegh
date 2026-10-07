@@ -9,11 +9,20 @@ it by section number and by line range.
 
 **What it was checked against.** The documentation claims come from the vendor's public Claude
 Code documentation, read on 2026-07-25. All URLs are under `code.claude.com/docs/en/` unless noted,
-and 2026-07-25 is the access date for every page in the Sources list. Where a documentation page
-states a version for a behaviour (for example "Requires Claude Code v2.1.203 or later"), that stamp
-is copied here verbatim. The stamps are the documentation's own and were not re-verified against a
-running binary. The observed behaviour was recorded on 2026-07-27 on one developer machine. The
-Claude Code version running at the time was not recorded.
+and 2026-07-25 is the access date for every page in the Sources list unless the Sources list says
+otherwise. Where a documentation page states a version for a behaviour (for example "Requires
+Claude Code v2.1.203 or later"), that stamp is copied here verbatim. The stamps are the
+documentation's own and were not re-verified against a running binary. The observed behaviour was
+recorded on 2026-07-27 on one developer machine. The Claude Code version running at the time was
+not recorded.
+
+**Update of 2026-10-06.** §3 (hooks) and §4 (permissions) were re-read against the documentation
+on 2026-10-06, when the current release was 2.1.292, because tegh was about to install hooks built
+against them. A claim checked on that date carries the date inside its tag, as in
+`[S2, "PostToolUse input", 2026-10-06]`, and the pages added on that date are listed in Sources.
+Material from 2026-07-25 that the re-reading contradicted is kept and marked **Changed by
+2026-10-06**. The other sections were not re-read, apart from one note in §5. A second set of
+behaviour was observed on 2026-10-06 against Claude Code 2.1.292 ("Coverage and limits").
 
 **How to read the confidence labels.**
 
@@ -31,7 +40,7 @@ claims about Claude Code.
 **Re-verify before relying on it.** Configuration formats, flag names, version thresholds and
 permission behaviour change between releases. Check a volatile claim against the current vendor
 documentation, or against a running installation, before building on it. The section "Coverage and
-limits" lists what was read, what was not, and the only behaviour that was observed.
+limits" lists what was read, what was not, and all of the behaviour that was observed.
 
 ## Summary for tegh
 
@@ -256,23 +265,108 @@ general protection for MCP configuration and is not on by default.
 
 ## 3. Hooks API
 
-### Events (partial list; the source table lists about 30)
+This section was first written from the documentation read on 2026-07-25. It was re-read against
+the documentation on 2026-10-06, when the current release was 2.1.292. Claims that carry a
+2026-10-06 tag were checked on that date. Claims from 2026-07-25 that the re-reading changed are
+marked **Changed by 2026-10-06**. Observed behaviour is in "Coverage and limits".
+
+### Events (partial list; the source table lists 33 on 2026-10-06)
 
 `SessionStart`, `UserPromptSubmit`, `PreToolUse` (before any tool call; can block), `PostToolUse`,
 `PostToolUseFailure`, `PostToolBatch`, `PermissionRequest`, `PermissionDenied`, `Notification`,
 `SubagentStart`/`SubagentStop`, `Stop`, `StopFailure`, `ConfigChange` (fires when a config file
 changes mid-session), `PreCompact`/`PostCompact`, `Elicitation`/`ElicitationResult` (MCP
 elicitation), `SessionEnd`, and others [S2, full table]. For tegh: `ConfigChange` is a candidate
-for detecting drift.
+for detecting drift. Exit 2 from a `ConfigChange` hook blocks the change from taking effect,
+except for `policy_settings` [S2, "Exit code 2 behavior per event", 2026-10-06].
+
+`PostToolUse` fires "after a tool call succeeds" and `PostToolUseFailure` "after a tool call
+fails" [S2, "Hook lifecycle", 2026-10-06]. `PostToolUseFailure` does not fire for a call rejected
+before it ran: an unknown tool name, input that fails validation, or a permission denial. A
+permission denial fires `PreToolUse` but not `PostToolUseFailure` [S2, "PostToolUseFailure",
+2026-10-06].
+
+### When the tool-call hooks fire
+
+`PreToolUse` and `PostToolUse` fire "on every tool call inside the agentic loop", except
+`EndConversation` calls, which skip both [S2, "Hook lifecycle", 2026-10-06]. "PreToolUse hooks run
+before every tool call, whether or not it needs permission" [S2, "PermissionRequest input",
+2026-10-06]. `PreToolUse` hooks "fire before any permission-mode check, in every permission mode,
+including `dontAsk`" [S12, "Hooks and permission modes", 2026-10-06]. The pages do not name reads
+that Claude Code auto-allows inside the working directory as a case. That such reads also fire the
+hooks is [Inferred] from "whether or not it needs permission" together with the permission table,
+under which file reads inside the working directory need no approval [S3, "Permission system",
+2026-10-06]. It was also observed on 2026-10-06 ("Coverage and limits").
+
+Three gaps in that coverage are documented:
+
+1. **`@` references fire no hook.** Files referenced with `@` in a prompt are inserted while the
+   prompt is built, with no tool call, "so no PreToolUse hook fires for them, including hooks
+   matching `Read`". The page directs a reader who needs to block such paths to a `Read` deny rule
+   [S2, "PreToolUse", 2026-10-06].
+2. **Searches arrive as `Bash`.** On macOS, Linux and WSL, Glob and Grep are absent from the default
+   tool set. Claude searches with `find` and `grep` through the Bash tool, which run embedded
+   versions of `bfs` and `ugrep`, "and the searches reach your hooks and permission rules as `Bash`
+   calls". On Windows, Glob is in the default set [S15, "Glob tool behavior", 2026-10-06].
+3. **A file-tool hook does not see a shell write.** Claude Code "doesn't run a `PostToolUse` hook
+   matching `Edit|Write` when a `Bash` command or a process outside Claude Code rewrites the same
+   file". `FileChanged` is the event for that, and it has no decision control [S2, "PostToolUse",
+   2026-10-06].
+
+Hooks from settings files, managed settings and plugins also run inside subagents, and the input
+then carries `agent_id` and `agent_type` [S2, "Hook locations", 2026-10-06].
+
+### Hook input
+
+Every event receives `session_id`, `transcript_path`, `cwd` and `hook_event_name`.
+`permission_mode` is one of `"default"`, `"plan"`, `"acceptEdits"`, `"auto"`, `"dontAsk"` or
+`"bypassPermissions"`, and not every event receives it. The mode labelled Manual arrives as
+`"default"`. The common fields also include `prompt_id`, `scratchpad_dir` (v2.1.257 or later) and
+`effort`, each present only in some circumstances [S2, "Common input fields", 2026-10-06].
+`agent_id` is present only inside a subagent call; `agent_type` is present inside a subagent or
+when the session runs with `--agent` [S2, "Common input fields", 2026-10-06].
+
+`PreToolUse` adds `tool_name`, `tool_input` and `tool_use_id`. For an MCP tool it adds
+`mcp_server`, an object with the server's `name` and a `source` naming where the definition came
+from (`plugin`, `sdk`, or a scope such as `user` or `project`). The page advises basing trust on
+`source` and not on the name or the `mcp__<server>__` prefix. `mcp_server` requires v2.1.274 or
+later [S2, "PreToolUse input", 2026-10-06].
+
+For `Write`, `Edit` and `Read`, `tool_input.file_path` "is always absolute": `~` and relative
+paths are expanded before hooks run. On Windows the path carries backslash separators [S2,
+"PreToolUse input", 2026-10-06].
+
+`PostToolUse` receives `tool_input` and `tool_response`, plus an optional `duration_ms` that
+excludes time spent in permission prompts and `PreToolUse` hooks. File-tool paths arrive in the
+same absolute form, and an MCP tool carries `mcp_server` [S2, "PostToolUse input", 2026-10-06].
+"The exact schema for both depends on the tool." The `tool_response` shape is documented for:
+
+| Tool | Documented `tool_response` |
+|---|---|
+| `Write` | example `{"filePath": ..., "type": "create"}` [S2, "PostToolUse input", 2026-10-06] |
+| `Bash` | `stdout`, `stderr`, `interrupted`, `isImage` [S2, "PostToolUse decision control", 2026-10-06]; `bashEditDiff`, best effort and in public beta, v2.1.269 or later [S2, "Bash", 2026-10-06] |
+| `Agent` | `status`, `agentId`, `content`, `resolvedModel`, token and duration fields; a background launch carries fewer [S2, "Agent", 2026-10-06] |
+| `ExitPlanMode` | `plan` and `filePath`, plus internal status flags [S2, "ExitPlanMode", 2026-10-06] |
+
+No `PostToolUse` `tool_response` shape is documented for `Read`. The `PostToolBatch` section says
+that its own `tool_response` for `Read` is the line-number-prefixed text the model receives, and
+that this differs from what `PostToolUse` passes, which is "the tool's structured `Output` object"
+[S2, "PostToolBatch input", 2026-10-06]. For tegh: a `PostToolUse` consumer that reads a `Read`
+result is relying on an undocumented shape.
 
 ### Matcher syntax
 
 Simple alphanumeric/`_`/`-`/space/`,`/`|` strings match exactly (`Bash`, `Edit|Write`). Anything
 else is treated as an unanchored JS regex (`^Notebook`, `mcp__memory__.*`) [S2]. MCP tools are
-addressable as a bare server (`mcp__memory`), as a wildcard over all of a server's tools
-(`mcp__memory__.*`), or as one tool (`mcp__memory__create_entities`). Plugin-bundled servers use
+addressable as a wildcard over all of a server's tools (`mcp__memory__.*`) or as one tool
+(`mcp__memory__create_entities`). Plugin-bundled servers use
 `mcp__plugin_<plugin-name>_<server-name>__<tool-name>`, so a matcher written against the bare
 server key never fires for a plugin server [S1, "Plugin MCP tool names"; S2].
+
+**Changed by 2026-10-06.** The 2026-07-25 text also listed a bare server name (`mcp__memory`) as a
+matcher. The current page says the `.*` is required: `mcp__memory` contains only exact-match
+characters, "so it is compared as an exact string and matches no tool" [S2, "Match MCP tools",
+2026-10-06]. The bare form remains valid in permission rules (§4), which are a different syntax.
 
 ### Can a hook block a tool call?
 
@@ -289,6 +383,134 @@ the call before permission rules are evaluated. Hook decisions never override de
 rules: a matching `deny` rule blocks regardless of what the hook returned, and a matching `ask`
 rule still prompts even if the hook said `"allow"` [S3, "Extend permissions with hooks"].
 
+Re-read on 2026-10-06, these additions:
+
+- `permissionDecision` takes `allow`, `deny`, `ask` or `defer`. When several `PreToolUse` hooks
+  disagree, precedence is `deny` > `defer` > `ask` > `allow`. Exit 2 routes the same way as
+  `"deny"`. `"defer"` is honoured only in `-p` mode [S2, "PreToolUse decision control" and "Defer
+  a tool call for later", 2026-10-06].
+- Exit 2 blocks "whether or not you print JSON: even a JSON `permissionDecision` of `"allow"`
+  can't override it" [S2, "Exit code 2", 2026-10-06]. A hook that exits 1 but prints a JSON object
+  that passes validation has that JSON honoured, `permissionDecision` included [S2, "Other exit
+  codes", 2026-10-06].
+- A `"deny"` blocks "even in `bypassPermissions` mode or with `--dangerously-skip-permissions`"
+  [S12, "Hooks and permission modes", 2026-10-06].
+- A hook's `"allow"` does not approve the actions no mode auto-approves (§4), and does not skip the
+  prompt for `AskUserQuestion`, `ExitPlanMode`, or MCP tools marked `requiresUserInteraction` [S2,
+  "PreToolUse decision control", 2026-10-06].
+- **A mod can override a hook's block.** "A mod you install that handles `tool.check` can approve a
+  call that your `PreToolUse` hook blocked, unless the hook is in managed settings" [S12, "Hooks
+  and permission modes", 2026-10-06; S3, "Extend permissions with hooks", 2026-10-06]. For tegh: a
+  `PreToolUse` deny placed in user or project settings is not final against a user-installed mod.
+
+### What a `PostToolUse` hook can and cannot do
+
+By the time it runs, the tool has already run. Its event-specific output fields are
+[S2, "PostToolUse decision control", 2026-10-06]:
+
+| Field | Effect |
+|---|---|
+| `decision: "block"` + `reason` | adds the reason next to the tool result; "Claude still sees the original output" |
+| `additionalContext` | text added to Claude's context beside the result |
+| `updatedToolOutput` | replaces what Claude sees; must match the tool's output shape, and for a built-in tool a mismatched value is ignored |
+| `updatedMCPToolOutput` | the MCP-only predecessor of `updatedToolOutput` |
+| `classifierContext` | a note for the auto-mode classifier (v2.1.236 or later) |
+
+`updatedToolOutput` "only changes what Claude sees": files written, commands run and network
+requests sent "have already taken effect", and OpenTelemetry spans capture the original output
+before the hook runs [S2, "PostToolUse decision control", 2026-10-06]. The universal `continue:
+false` stops Claude entirely, and for `PreToolUse` and `PostToolUse` the stop applies even when the
+call completes while Claude is still streaming [S2, "JSON output", 2026-10-06]. Exit 2 from
+`PostToolUse` shows stderr to Claude; "the tool already ran" [S2, "Exit code 2 behavior per event",
+2026-10-06]. `PostToolUse` hooks "can't undo actions" [S12, "Limitations", 2026-10-06].
+
+`PostToolUseFailure` has one event-specific output field, `additionalContext` [S2,
+"PostToolUseFailure decision control", 2026-10-06]. The universal fields apply to it as to every
+event. The page's own summary table lists it among the events using a top-level `decision:
+"block"` [S2, "Decision control", 2026-10-06], which disagrees with its per-event section; neither
+statement gives `decision` an effect beyond feedback.
+
+### Failure semantics
+
+The documented rule for command hooks [S2, "Exit code output", "Other exit codes" and "Timeouts",
+2026-10-06]:
+
+| Hook outcome | Effect on a `PreToolUse` call |
+|---|---|
+| exit 2 | blocks; stderr (or the JSON reason) becomes the denial reason |
+| exit 0, stdout a JSON object that passes validation | the JSON decides |
+| exit 0, empty stdout | no decision; normal permission flow |
+| exit 0, JSON that fails to parse or fails validation | non-blocking error; the call proceeds |
+| any other exit (1 included) without valid JSON | non-blocking error; the call proceeds |
+| plain-text or empty stdout on a non-zero, non-2 exit | non-blocking error; the call proceeds |
+| script missing or not executable (shell exits 127) | non-blocking error; "the action proceeds" |
+| timeout | the hook is cancelled and its output discarded; a timed-out `command`, `http` or `mcp_tool` hook "doesn't block the tool call" |
+
+The page's warning on the missing-script case: "a mistyped path in `settings.json` leaves the gate
+silently disabled" [S2, "Other exit codes", 2026-10-06]. An Agent SDK callback hook is the
+exception: one that exceeds its timeout on `PreToolUse` blocks the call [S2, "Timeouts",
+2026-10-06].
+
+HTTP hooks use status and body instead of exit code and stdout [S2, "HTTP response handling",
+2026-10-06]:
+
+| HTTP outcome | Effect |
+|---|---|
+| 2xx, empty body | success, equivalent to exit 0 with no output |
+| 2xx, JSON object body | parsed with the same output schema; a body that fails validation is a non-blocking error |
+| 2xx, any other body (plain text) | non-blocking error, handled as a non-2xx |
+| non-2xx status | non-blocking error, execution continues |
+| connection failure | non-blocking error, execution continues |
+| timeout | the hook is cancelled, as for command hooks |
+
+"HTTP hooks can't signal a blocking error through status codes alone." To block, the endpoint
+returns a 2xx with a JSON decision [S2, "HTTP response handling", 2026-10-06].
+
+Default timeouts: 600 seconds for `command`, `http` and `mcp_tool`; 30 for `prompt`; 60 for
+`agent`. The first three drop to 30 seconds on `UserPromptSubmit`, `PreModelSwitch` and
+`PostModelSwitch`, and to 10 on `MessageDisplay` [S2, "Common fields", 2026-10-06; S12,
+"Limitations", 2026-10-06].
+
+No setting was found, in the pages read on 2026-10-06, that makes a settings-file hook's failure
+block the call [Inferred from absence: the pages' fail-closed settings concern managed-settings
+delivery (`forceRemoteSettingsRefresh`) and malformed managed keys, not hooks; S13, "Keys that fail
+closed"; S17, "Enforce fail-closed startup"]. The page directs a reader who needs a hard allow or
+deny to the permission system, because the `if` filter is best effort [S2, "How `if` patterns
+match Bash commands", 2026-10-06].
+
+**Changed in 2.1.288.** "Fixed PreToolUse and PermissionRequest hooks being skipped when matching
+them failed or the tool's input could not be serialized to JSON; the call is now blocked" [S16,
+2.1.288, 2026-10-06]. That entry covers a hook the harness skipped. It does not change the table
+above for a hook that ran and failed.
+
+### HTTP hooks
+
+`type: "http"` posts "the hook's JSON input as the POST request body with `Content-Type:
+application/json`", the same JSON a command hook receives on stdin [S2, "HTTP hook fields",
+2026-10-06; S12, "HTTP hooks", 2026-10-06]. Fields [S2, "HTTP hook fields" and "Common fields",
+2026-10-06]:
+
+| Field | Meaning |
+|---|---|
+| `url` | required; the POST target |
+| `headers` | extra headers; values interpolate `$VAR` / `${VAR}` |
+| `allowedEnvVars` | the variables that may be interpolated; an unlisted reference becomes an empty string |
+| `timeout` | seconds, default 600 |
+| `if` | one permission-rule pattern; evaluated only on tool events |
+
+Two settings bound HTTP hooks from every source, managed included [S2, "Hook locations",
+2026-10-06; S14, "Hooks and automation", 2026-10-06]:
+
+- `allowedHttpHookUrls`: when defined at any level, an HTTP hook runs only if its URL matches the
+  merged allowlist; an empty array blocks every HTTP hook. Arrays merge across settings files.
+- `httpHookAllowedEnvVars`: a variable is interpolated only if both the hook's own
+  `allowedEnvVars` and this list name it.
+
+Output caps: a hook's `additionalContext`, `systemMessage` and `initialUserMessage` strings, and
+its plain stdout, are capped at 10,000 characters each. Over the cap, Claude Code saves the text to
+a file and passes the path plus a preview of up to 2,000 characters; no setting raises the cap [S2,
+"JSON output", 2026-10-06].
+
 ### Configuration locations
 
 `~/.claude/settings.json` (user, all projects), `.claude/settings.json` (project, committable),
@@ -296,11 +518,21 @@ rule still prompts even if the hook said `"allow"` [S3, "Extend permissions with
 editable by user or project), plugin `hooks/hooks.json`, and skill/agent frontmatter [S2,
 "Hook Configuration Locations"].
 
+Re-read on 2026-10-06: hook entries "merge across settings levels rather than replacing each
+other", and the same handler defined in more than one settings file runs once [S2, "Hook
+locations" and "Hook handler fields", 2026-10-06]. In an interactive session, hooks from every
+settings file wait for the workspace trust dialog. In a `-p` or SDK session Claude Code "treats the
+folder as trusted, so hooks committed in a repository's `.claude/settings.json` run in a folder
+you've never trusted" [S2, "Workspace trust", 2026-10-06].
+
 ### Apply to built-in tools too?
 
 Yes. Hooks fire for Bash, Read, Write, Edit, WebFetch, and MCP tools alike. The only carve-out is
 `EndConversation`, which a bare-name deny/ask rule (hook-adjacent permission machinery) can never
 remove while any other tool remains [S2, "Application to Built-in Tools"; S3, "Manage permissions"].
+On 2026-10-06 the hooks page also states that `EndConversation` skips `PreToolUse` and
+`PostToolUse` entirely [S2, "Hook lifecycle", 2026-10-06]. The documented gaps are listed under
+"When the tool-call hooks fire" above.
 
 ### Security considerations
 
@@ -309,7 +541,44 @@ sandboxing, and parse untrusted JSON from stdin [S2, "Security Considerations"].
 lock this down with `allowManagedHooksOnly` (blocks user/project/plugin hooks except force-enabled
 plugins) [S2; S3, "Managed-only settings"].
 
+Re-read on 2026-10-06. Under `allowManagedHooksOnly: true`, managed hooks, Agent SDK in-process
+hooks and hooks from plugins force-enabled in managed `enabledPlugins` (matched on the full
+`plugin@marketplace` ID) run. User, project and local hooks, hooks and mods from other plugins, and
+hooks in agent frontmatter are blocked. Mods built into Claude Code keep running [S14, "What runs
+under `allowManagedHooksOnly`", 2026-10-06]. `disableAllHooks` set anywhere but managed settings
+disables user, project, local and plugin hooks, and leaves managed hooks, SDK hooks and
+force-enabled plugin hooks running. "Only managed settings can disable managed hooks" [S14,
+"`disableAllHooks`", 2026-10-06; S2, "Disable or remove hooks", 2026-10-06].
+
+### Version and changelog, 2.1.280 to 2.1.292
+
+The current release on 2026-10-06 was 2.1.292, dated October 6, 2026 [S16, 2026-10-06]. Entries in
+that range that bear on settings-file hooks, permission checks and managed settings, quoted from
+[S16, 2026-10-06]:
+
+| Version | Entry |
+|---|---|
+| 2.1.292 | "Security: Fixed PreToolUse hook approvals and auto mode bypassing the permission prompt for file reads from network (UNC) paths" |
+| 2.1.292 | "Improved hook output handling: `<system-reminder>` tags written in a hook's output are escaped before they reach Claude" |
+| 2.1.292 | "Fixed a tampered on-disk cache of server-managed settings being able to switch off or unseat the built-in policy plugin while the settings fetch failed" |
+| 2.1.290 | "Fixed some permission rules and safety checks not being applied to a tool call after a PreToolUse hook rewrote its input" |
+| 2.1.290 | "Fixed Bash permission checks auto-approving some read-only commands (such as `rg` or `git grep`) whose arguments the shell would still expand as wildcards; these now prompt for approval" |
+| 2.1.288 | "Fixed PreToolUse and PermissionRequest hooks being skipped when matching them failed or the tool's input could not be serialized to JSON; the call is now blocked" |
+| 2.1.287 | "Changed whole-tool `Bash` allow rules and allowing hooks to prompt for, not run, shell writes to files Claude Code's file tools refuse outright (the Anthropic profile store, the host credentials file)" |
+| 2.1.285 | "Fixed synchronous hooks hanging Claude Code while a background process the hook started (for example `some-daemon &`) kept its output open; the hook now finishes shortly after its own process exits" |
+| 2.1.284 | "Fixed the debug log dropping a failed hook's stderr when the hook also wrote to stdout, and logging nothing for a failed hook with no output; failed hooks now also log their status code" |
+| 2.1.282 | "Fixed managed settings ignoring a mistyped value for boolean lock keys such as `disableClaudeAiConnectors` or `allowManagedPermissionRulesOnly`; the lock now applies and startup names the key" |
+| 2.1.281 | "Fixed `--setting-sources` (and SDK `settingSources`) not being forwarded to spawned sessions: teammates, `/bg`, `claude agents` sessions and `--worktree --tmux` now start with the parent's restriction" |
+| 2.1.281 | "Fixed `mcp_tool` hooks on blocking events (PreToolUse and similar) being skipped while their MCP server was still connecting; they now wait for it, up to the MCP connect timeout" |
+| 2.1.281 | "Fixed `claude --bg` starting a background session, and running its project hooks, in a directory that had not passed the workspace trust prompt" |
+| 2.1.280 | "Changed `PermissionRequest` hooks: an agent-type hook no longer runs there, since its answer could never allow or deny the request" |
+
+Entries about mod hooks (the plugin `tool.check`/`tool.call` interface) and `/hooks` display
+changes in the same range are omitted.
+
 ## 4. Permission system
+
+Re-read on 2026-10-06 under the same convention as §3.
 
 ### Rules
 
@@ -318,7 +587,8 @@ most settings, which override) [S3, "Manage permissions"]. Evaluation order is d
 allow; the first match wins regardless of specificity, so a broad deny like `Bash(aws *)` beats a
 narrower allow like `Bash(aws s3 ls)` [S3, "Manage permissions"]. A bare tool name (`Bash`) as a
 deny rule removes the tool from Claude's context entirely; a scoped rule (`Bash(rm *)`) leaves the
-tool present and blocks matching calls [S3].
+tool present and blocks matching calls [S3]. All three statements were confirmed on 2026-10-06
+[S3, "Manage permissions", 2026-10-06].
 
 MCP-specific rule syntax: `mcp__<server>` (any tool from that server), `mcp__<server>__*` (explicit
 wildcard, same effect), `mcp__<server>__<tool>` (one tool); a bare `mcp__*` denies every MCP tool
@@ -337,15 +607,68 @@ wildcard, same effect), `mcp__<server>__<tool>` (one tool); a bare `mcp__*` deni
 
 [S3, "Permission modes" table; S11]
 
+The 2026-10-06 reading states each mode by what runs without a prompt [S11, "Available modes",
+2026-10-06]:
+
+| Mode | What runs without asking |
+|---|---|
+| `default` | reads only |
+| `acceptEdits` | reads, file edits, and common filesystem commands; the mode's own section lists `mkdir`, `touch`, `rm`, `rmdir`, `mv`, `cp` and `sed`, for paths inside the working directory or `additionalDirectories` [S11, "Auto-approve file edits with acceptEdits mode", 2026-10-06] |
+| `plan` | reads, plus classifier-approved commands when auto mode is available |
+| `auto` | everything, with background safety checks |
+| `dontAsk` | reads and pre-approved tools; "anything that would prompt is denied" |
+| `bypassPermissions` | everything, except the actions no mode auto-approves (below) |
+
+`dontAsk` still runs actions that need no approval in Manual mode, "such as file reads inside your
+working directories and read-only Bash commands", plus calls matching `permissions.allow` and calls
+approved by a `PreToolUse` hook [S11, "Allow only pre-approved tools with dontAsk mode",
+2026-10-06].
+
+**Changed by 2026-10-06.** With v2.1.283 or later, auto mode is the built-in starting permission
+mode for interactive terminal and VS Code sessions [S11, "Choose a permission mode", 2026-10-06]. A
+session that sets no mode therefore starts in `auto`, and not in `default`. The 2026-07-25
+`acceptEdits` row named four commands; the current mode section names seven, `rm` and `rmdir`
+among them.
+
+### Read-only Bash commands
+
+"Claude Code recognizes a built-in set of Bash commands as read-only and runs them without a
+permission prompt in every mode", subject to `permissions.blockReadsOutsideWorkingDirectories`.
+The set includes `ls`, `cat`, `echo`, `pwd`, `head`, `tail`, `grep`, `find`, `wc`, `which`,
+`diff`, `stat`, `du`, `cd`, and read-only forms of `git`. "The set is not configurable"; an `ask`
+or `deny` rule is the way to make one of them prompt [S3, "Read-only commands", 2026-10-06]. In
+Manual mode some of them still prompt: an unquoted glob with a write-capable command, `docker`
+pointed at another daemon, a network path on Windows, writes to special shell variables, and any
+command the analysis cannot parse, including every command over 10,000 characters [S3, "Read-only
+commands", 2026-10-06]. For tegh: `cat` on a file inside the project is an approval-free call in
+every mode, so the permission layer alone records nothing about it.
+
+### Actions no mode auto-approves
+
+No mode, `bypassPermissions` included, auto-approves [S11, "Actions no mode auto-approves",
+2026-10-06]:
+
+- tools matched by an explicit `ask` rule;
+- connector tools the organization set to `ask`;
+- tools that require user interaction: `AskUserQuestion` and MCP tools marked
+  `requiresUserInteraction`;
+- `rm` and `rmdir` removals targeting a critical path, "which no allow rule or `PreToolUse` hook
+  `"allow"` approves";
+- the cross-session messaging safeguards;
+- reads outside the working directories while `permissions.blockReadsOutsideWorkingDirectories`
+  is on (v2.1.257 or later).
+
+In `dontAsk` these are denied rather than prompted [S11, "Allow only pre-approved tools with
+dontAsk mode", 2026-10-06].
+
 ### Managed/enterprise policy a user cannot override
 
 Delivery mechanisms: server-managed settings (fetched at sign-in), MDM/OS-level policy
 (macOS `com.anthropic.claudecode` preferences domain; Windows `HKLM\SOFTWARE\Policies\ClaudeCode`),
 or a file at a fixed OS path (`managed-settings.json`, with a `managed-settings.d/` drop-in dir)
-[S4, "Settings File Locations"]. The Windows detail needs re-verification (see "Coverage and
-limits"). Precedence is managed > CLI args > local project settings > shared project settings >
-user settings, and permission rules merge across these where other settings override [S3,
-"Settings precedence"]. Managed-only locks relevant to tegh:
+[S4, "Settings File Locations"]. Precedence is managed > CLI args > local project settings > shared
+project settings > user settings, and permission rules merge across these where other settings
+override [S3, "Settings precedence"]. Managed-only locks relevant to tegh:
 
 | Setting | Effect |
 |---|---|
@@ -355,6 +678,70 @@ user settings, and permission rules merge across these where other settings over
 | `disableSideloadFlags` | rejects `--plugin-dir`, `--plugin-url`, `--agents`, `--mcp-config` at startup, which closes the CLI-flag interposition lever in item 5 of the summary [S3, "Managed-only settings"; S4] |
 | `strictPluginOnlyCustomization` | can force skills/agents/hooks/MCP to come only from plugins or managed settings, closing off user/project `.mcp.json` entirely [S3] |
 | `disableBypassPermissionsMode` | can be set from any scope (including a user locking themselves out) and is "typically placed in managed settings to enforce organizational policy" [S3] |
+
+Re-read on 2026-10-06, with the Windows detail the 2026-07-25 reading left unverified now taken
+from the page text:
+
+**File paths.** `managed-settings.json`, an optional `managed-settings.d/` directory and
+`managed-mcp.json` live in `/Library/Application Support/ClaudeCode/` on macOS,
+`/etc/claude-code/` on Linux and WSL, and `C:\Program Files\ClaudeCode\` on Windows. The legacy
+`C:\ProgramData\ClaudeCode\managed-settings.json` is not read [S13, "Where each mechanism stores
+the policy", 2026-10-06]. `managed-settings.json` merges first, then every `*.json` in
+`managed-settings.d/` in alphabetical order: later single values replace earlier ones and lists
+combine [S13, "Split a file-based policy across teams", 2026-10-06].
+
+**Delivery and refresh** [S13, "Choose a delivery mechanism" and "Where each mechanism stores the
+policy", 2026-10-06; S17, "Fetch and caching behavior", 2026-10-06]:
+
+| Mechanism | Where it lives | When Claude Code reads it |
+|---|---|---|
+| Server-managed | claude.ai admin console or a self-hosted gateway; a local cache | fetched at startup, polled hourly |
+| MDM / OS policy | macOS `com.anthropic.claudecode` managed preferences domain; Windows `Settings` value (`REG_SZ` or `REG_EXPAND_SZ`) under `HKLM\SOFTWARE\Policies\ClaudeCode` | at startup, checked every 30 minutes |
+| File-based | the paths above | at startup, reloaded when a file changes |
+| HKCU, Windows and WSL | `Settings` under `HKCU\SOFTWARE\Policies\ClaudeCode` | at startup, every 30 minutes; used only when no admin document sits above it |
+
+By default (`managedSourcesBehavior: "first-wins"`) Claude Code uses the highest-ranked source that
+delivers a policy key and ignores the others; `"merge"` (v2.1.242 or later) composes them [S13, "How
+Claude Code combines managed sources", 2026-10-06]. Agent SDK sessions load managed settings even
+when `settingSources` excludes user, project and local [S13, "Where and when a policy applies",
+2026-10-06].
+
+**The hook and permission locks** [S14, 2026-10-06]:
+
+- `allowManagedHooksOnly` (managed only): what still runs and what is blocked is listed in §3,
+  "Security considerations".
+- `allowManagedPermissionRulesOnly` (managed only): Claude Code "ignores `allow`, `ask`, and `deny`
+  rules in user, project, local, and `--settings` files, ignores `--allowedTools`, hides the
+  always-allow choices in permission prompts, and stops saving new rules". `--disallowedTools` and
+  the session's own `deny` and `ask` rules still apply, since they only restrict. From v2.1.282 it
+  also ignores `allowed-tools` frontmatter in skills and commands from the repository, the user's
+  directories and `--add-dir` [S14, "`allowManagedPermissionRulesOnly`", 2026-10-06].
+- `permissions.disableBypassPermissionsMode: "disable"` (any file): Claude Code rejects
+  `--dangerously-skip-permissions` and ignores an agent definition's `permissionMode:
+  bypassPermissions` [S14, "`permissions.disableBypassPermissionsMode`", 2026-10-06].
+  `permissions.disableAutoMode` does the same for `auto` [S3, "Permission modes", 2026-10-06].
+- `disableAllHooks` outside managed settings cannot disable managed hooks [S14, "`disableAllHooks`",
+  2026-10-06].
+
+**What the managed tier does not bind.** The pages name four limits:
+
+1. A user-installed mod that handles `tool.check` can approve a call a non-managed `PreToolUse`
+   hook blocked (§3) [S3, "Extend permissions with hooks", 2026-10-06].
+2. "A developer who is an administrator on the machine can edit the managed source itself" [S13,
+   "What a developer can change", 2026-10-06].
+3. Server-managed settings "operate as a client-side control, not a security boundary. On
+   unmanaged devices, a user doesn't need admin or sudo access to bypass them." Editing the cached
+   file applies at startup until the next fetch; a modified binary bypasses any client-side
+   control; a third-party model provider bypasses server-managed settings [S17, "Security
+   considerations", 2026-10-06].
+4. "Managed settings bind Claude Code only" [S13, "What a developer can change", 2026-10-06].
+
+**`--setting-sources`.** A comma-separated list of `user`, `project` and `local`, for example
+`claude --setting-sources user,project` [S8, "CLI flags", 2026-10-06]. Since 2.1.281 the list is
+forwarded to teammates, `/bg`, `claude agents` sessions and `--worktree --tmux` [S16, 2.1.281,
+2026-10-06]. The permissions page names `--setting-sources user` as a way to keep a `claude -p` run
+from reading a project's settings files and `.mcp.json` [S3, "What runs before you trust a folder",
+2026-10-06].
 
 ### `--dangerously-skip-permissions`
 
@@ -391,6 +778,17 @@ exception is an operator who has explicitly chosen `bypassPermissions` (document
 protection against prompt injection," used advisedly in isolated containers/VMs [S11, S3]) or
 `dontAsk` with a broad pre-approval. The table above qualifies "a human sees a prompt every time":
 in `auto`, and in `plan` where auto mode is available, the write is routed to the classifier.
+
+**Changed by 2026-10-06.** Three facts above moved [S11, "Protected paths" and "Choose a
+permission mode", 2026-10-06]. The `plan` row now reads: allowed in interactive terminal sessions
+with bypass permissions available, otherwise routed to the classifier when auto mode is available
+during planning, otherwise prompted. The session-scoped opt-in is now worded per folder: "Yes, and
+allow Claude to edit files in this project's .claude folder for this session", with a matching
+option for `~/.claude/`. And with v2.1.283 or later, `auto` is the built-in starting mode for
+interactive terminal and VS Code sessions (§4), so "a default configuration" now starts in the
+mode whose protected-path writes go to the classifier, and the guardrail conclusion's "a human sees
+a prompt every time" holds only for a session started in `default`. The protected-file list still
+names `.mcp.json` and `.claude.json`. The page still does not say which tools the gate covers.
 
 If sandboxing is additionally enabled, there is a second, OS-level backstop: **"the sandbox
 automatically denies write access to Claude Code's `settings.json` files at every scope and to the
@@ -511,6 +909,24 @@ All on `code.claude.com`, all on 2026-07-25.
 | `/permission-modes` (full page) | protected-paths table |
 | `/agent-sdk/overview` (full page) | Agent SDK overview, capabilities tabs, Claude Code feature parity |
 
+On 2026-10-06, for §3 and §4 only, each fetched as the page's Markdown form
+(`https://code.claude.com/docs/en/<page>.md`):
+
+| Page | What was taken from it |
+|---|---|
+| `/hooks` (full page) | lifecycle, input fields, decision control, exit-code and HTTP failure handling, timeouts, HTTP hook fields, output caps, workspace trust |
+| `/hooks-guide` (targeted sections) | hooks and permission modes, the mod override, limitations, HTTP hooks |
+| `/permissions` (targeted sections) | permission table, rules, modes, read-only commands, hooks, managed settings, workspace trust |
+| `/permission-modes` (targeted sections) | modes table, actions no mode auto-approves, `acceptEdits`, `dontAsk`, `bypassPermissions`, protected paths |
+| `/managed-settings` (targeted sections) | delivery mechanisms, paths, refresh, `managed-settings.d/`, what a developer can change, managed-only keys |
+| `/server-managed-settings` (targeted sections) | fetch cadence, security considerations |
+| `/settings-reference` (targeted entries) | `allowedHttpHookUrls`, `allowManagedHooksOnly`, `disableAllHooks`, `httpHookAllowedEnvVars`, `allowManagedPermissionRulesOnly`, `permissions.disableBypassPermissionsMode` |
+| `/tools-reference` (targeted sections) | Glob and Grep default availability |
+| `/cli-reference` (targeted extraction) | `--setting-sources` |
+| `/changelog` (2.1.280 to 2.1.292) | current version and hook-relevant entries |
+
+`/settings` was also fetched on 2026-10-06 and nothing was taken from it.
+
 ### Pages not read, and what that limits
 
 `/plugins` and `/plugins-reference` were not read. The plugin MCP-server mechanics in §6 come from
@@ -523,7 +939,9 @@ referenced here only through its mention on the `/mcp` page, so its full signatu
 are not verified.
 
 `/server-managed-settings` and `/claude-apps-gateway` were seen only as cross-links inside pages
-that were read, and were not opened.
+that were read, and were not opened. `/server-managed-settings` was read on 2026-10-06 [S17];
+`/claude-apps-gateway` remains unread. The mods pages (`/plugins/mods/*`) were not read on
+2026-10-06, so the mod override in §3 rests on the hooks guide and the permissions page only.
 
 ### Not established
 
@@ -533,7 +951,9 @@ issue report, not written by the vendor, and it is not used as a basis for any c
 
 Windows-specific managed-settings registry precedence and the WSL inheritance flag were taken from
 a machine-generated summary of the `/settings` page and not from the page text. Re-verify them
-against `/settings` directly before building on them.
+against `/settings` directly before building on them. The registry paths, the HKCU fallback and
+`wslInheritsWindowsSettings` were re-read from the `/managed-settings` page text on 2026-10-06 (§4)
+[S13]; registry precedence beyond what §4 records is still unverified.
 
 Also open, and stated where they arise: which environment variables a stdio child receives (§1),
 whether `${VAR}` expansion applies outside `.mcp.json` (§1), whether the sandbox protects
@@ -548,8 +968,9 @@ against a running binary.
 
 ### Behaviour observed since
 
-Observed on 2026-07-27, on one developer machine, Claude Code version not recorded. These are the
-only statements in this document that are not documentation claims:
+The two blocks below are the only statements in this document that are not documentation claims.
+
+Observed on 2026-07-27, on one developer machine, Claude Code version not recorded:
 
 1. The structure of `~/.claude.json`, on a config of roughly 220 KB with over a hundred project
    entries: there is no top-level `mcpServers` key when the user has no user-scope servers.
@@ -557,11 +978,37 @@ only statements in this document that are not documentation claims:
 3. The file round-trips byte-identically through `json.dumps(indent=2, ensure_ascii=False)`.
 4. `claude mcp list` reports a rewritten local-scope entry as `✔ Connected`.
 
+**Observed, 2026-10-06.** On one developer machine, Claude Code 2.1.292, headless (`claude -p`),
+with the hooks in a project `.claude/settings.json` and the session started with
+`--setting-sources project`. Managed settings were not tested, because they need root.
+
+1. `PreToolUse` and `PostToolUse` fired for Read, Bash, Write and Edit calls.
+2. A hook blocked a Bash call both by exiting 2 and by returning `permissionDecision: "deny"`.
+3. A hook that exited 1, one that printed non-JSON, and one that ran past its timeout each let the
+   call proceed. So did an `http` hook whose endpoint was down.
+4. With Write and Edit allowed, the agent's writes to `.claude/settings.json` asked for a permission
+   that was never granted. The agent then overwrote the hook's script file with Write, and the next
+   Bash call ran. The script sat at the project root, outside the protected `.claude/` directory
+   (§5); only the settings file that named it was protected.
+5. An `http` hook delivered the `Authorization` header set in the settings file.
+6. With no allow rules in the harness and a `PreToolUse` hook answering every call with an explicit
+   allow or deny, stopping the hook's endpoint left a Bash call refused in `dontAsk` mode
+   ("Permission to use Bash has been denied because Claude Code is running in don't ask mode") and
+   left it as an unanswered permission prompt in `default` mode, while a Read inside the project
+   still proceeded.
+
+Items 3 and 6 match the failure table in §3: a failed hook renders no decision, and the harness's
+own permission flow then decides [Inferred]. For tegh, from item 4 [Inferred]: the settings file
+that defines a hook is a protected path, and the script a command hook runs need not be, so a hook
+is only as fixed as the least protected file it executes.
+
 Everything else here remains unverified against a binary.
 
 ## Sources
 
-All read on 2026-07-25.
+[S1] to [S11] were read on 2026-07-25. [S2], [S3], [S8] and [S11] were read again on 2026-10-06
+for §3 and §4, and [S12] to [S17] were first read on 2026-10-06. A tag that carries a date names
+the reading it comes from.
 
 | Tag | Page | URL |
 |---|---|---|
@@ -576,9 +1023,15 @@ All read on 2026-07-25.
 | [S9] | Agent SDK overview | `https://code.claude.com/docs/en/agent-sdk/overview` |
 | [S10] | Configure the sandboxed Bash tool | `https://code.claude.com/docs/en/sandboxing` |
 | [S11] | Choose a permission mode | `https://code.claude.com/docs/en/permission-modes` |
+| [S12] | Automate actions with hooks | `https://code.claude.com/docs/en/hooks-guide` |
+| [S13] | Deploy managed settings | `https://code.claude.com/docs/en/managed-settings` |
+| [S14] | Settings reference | `https://code.claude.com/docs/en/settings-reference` |
+| [S15] | Tools reference | `https://code.claude.com/docs/en/tools-reference` |
+| [S16] | Changelog | `https://code.claude.com/docs/en/changelog` |
+| [S17] | Configure server-managed settings | `https://code.claude.com/docs/en/server-managed-settings` |
 
 [S6] was read and no claim in this document cites it.
 
 Not read, and referenced only through cross-links inside the pages above (see "Coverage and limits"
 for what this limits): `/plugins`, `/plugins-reference`, `/agent-sdk/permissions`,
-`/agent-sdk/hooks`, `/server-managed-settings`, `/claude-apps-gateway`.
+`/agent-sdk/hooks`, `/claude-apps-gateway`, and the mods pages.
