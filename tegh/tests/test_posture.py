@@ -219,6 +219,37 @@ def test_tegh_names_no_builtin_tool_or_hook_api():
     )
 
 
+def test_the_built_ins_line_reads_the_hook_and_never_moves_its_verdict(tmp_path):
+    """Observed or not, built-ins are ungated: the hook adds evidence, never a gate.
+
+    Read from the project's harness settings, so a wrap with `--no-hooks` and a
+    wrap with the hook report differently, and neither says "gated".
+    """
+    from tegh.harnesses.claude_code import hook_command, hook_site
+    from tegh.hooksite import plan_hook, write_hook
+    from tegh.lock import Harness
+    from tegh.posture import _built_ins_line, _hook_observes
+
+    project = tmp_path / "widget"
+    project.mkdir()
+    assert _hook_observes(project, Harness.CLAUDE_CODE) is False
+    write_hook(plan_hook(hook_site(project), hook_command(
+        project, launcher=["tegh"], home=tmp_path / "tegh"
+    )))
+    assert _hook_observes(project, Harness.CLAUDE_CODE) is True
+    hook_site(project).path.write_text("not json", encoding="utf-8")
+    assert _hook_observes(project, Harness.CLAUDE_CODE) is None
+
+    lines = {observed: _built_ins_line(observed) for observed in (True, False, None)}
+    assert {line.holds for line in lines.values()} == {"no"}
+    assert lines[True].detail.startswith("OBSERVED, not gated")
+    assert lines[False].detail.startswith("NOT observed")
+    for line in lines.values():
+        lowered = line.detail.lower()
+        for overclaim in ("confined", "blocked", "protected", "mediated"):
+            assert overclaim not in lowered, (overclaim, line.detail)
+
+
 def test_no_gap_is_described_as_pending_or_planned(project, store):
     """A gap described in the future tense reads to a user as handled."""
     text = render(_report(project, store)).lower()

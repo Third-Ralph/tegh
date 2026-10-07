@@ -235,6 +235,14 @@ Restore with: tegh unwrap --project /Users/you/tegh-demo
 
 The harness config now names one server, `tegh`, and the memory server is reached only through it.
 
+The wrap also adds one hook to `.claude/settings.local.json` in the project, creating the file if
+there is none: a `PostToolUse` entry that runs `tegh hook` after each of Claude Code's own tool
+calls (§5 says what it does). The sample above was captured before tegh added it. A wrap now also
+prints a `hook` line under `gateway`, naming that file, and a paragraph saying the built-in tools are
+observed and not gated. `tegh wrap --no-hooks` leaves the hook out. The file is the project's local
+settings, which Claude Code's documentation describes as gitignored. tegh does not edit
+`.gitignore`, so if your repository does not ignore that file, `git status` shows it.
+
 A wrap has a commit point, and it is the line between those two headings. Before it, the wrap
 writes files (its manifest, the lock, the backup and the harness config, in that order) and
 proposes each admission. A proposal makes no tool callable. If the wrap stops there (Ctrl-C, a
@@ -304,6 +312,25 @@ The broker has two grounds for holding it, and the audit tape (§7) names the on
 - **`irreversible external write`** is what the tape says when the write is the first thing in its
   turn, which is the `tegh call` below. This one comes from the classification you set in §4, not
   from anything the agent or the server said at call time.
+
+Claude Code's own tools count too, but only as observations. After each built-in call (Read, Bash,
+Write, Edit, WebFetch, WebSearch and the rest) the hook the wrap installed runs `tegh hook`, which
+reports the call to the gateway: what kind of tool it was, whether its subject was in the project,
+under your home directory, elsewhere or remote, and digests of the subject and the result. The
+path, URL or command itself never leaves the hook. The tape records each report as
+`abstain`/`observed` under the tool `harness-tool`. A Read of a file outside the project, a
+WebFetch or a WebSearch taints the turn the way an MCP read does, so the next external write is held
+as a `tainted external write`. A Read inside the project is recorded and does not taint: the wrap's
+manifest trusts `harness:claude-code/file-read/project`, because the project is the code the agent
+was asked to work on. A Bash command that reads a file is recorded as `shell` and taints nothing.
+
+None of this gates a built-in call. The hook runs after the call has happened, nothing it does can
+stop or undo one, and a hook that fails, times out or is removed lets the call through unrecorded,
+which is how Claude Code treats every hook failure. Each built-in call now also runs one short
+process. A project wrapped before tegh added the hook has neither the hook nor that trusted read
+source; `tegh unwrap` and then `tegh wrap claude` again add both. tegh does not add the trusted
+source to an existing manifest on its own, because the manifest's envelope hash binds the grants the
+wrap issued, and changing it would quarantine every one of them.
 
 To see the broker's answers verbatim, or to do this step without Claude Code, `tegh call` drives one
 call through the same gateway as the same principal. The samples on this page were captured this
@@ -555,6 +582,11 @@ unwrapped /Users/you/tegh-demo (wrapped 2026-10-04T15:11:54.699203+00:00). The h
 
 Restores the displaced config **byte-for-byte**, with the permission bits the file already had.
 
+The sample above was captured before tegh added the built-in tool hook. An unwrap now also has a
+`remove` line for tegh's `PostToolUse` hook entry in `.claude/settings.local.json`, and another
+for the file itself when the wrap created it and nothing else has been added to it. A hook you
+added beside it, in the same list or the same group, is kept.
+
 Leaving the admitted rows in place does not shorten the next wrap. As of 0.1.1 a second `tegh wrap`
 asks the tool review again, for every tool (#13). It remembers only the values you classified as
 configuration.
@@ -657,3 +689,9 @@ Stated because every claim here names its posture or is an overclaim (the platfo
   identity is refused there rather than silently downgrading the record.
 - **MCP servers still run unconfined.** tegh spawns them as child processes with the environment it
   was told to give them. It decides *whether a call happens*, not what the server does once it runs.
+- **Claude Code's built-in tools are observed, not gated or contained.** The hook reports a call
+  after it ran, so a built-in write, shell command or fetch happens whatever the broker would have
+  said. A read the hook classifies wrongly, a read made through Bash, and any call made while the
+  hook is failing or has been removed leave the turn untainted. One gateway per project holds the
+  address the hook reports to, so two Claude Code sessions in one project report to the first
+  one's turn. Containment is what closes this, and it is posture 2.
