@@ -99,7 +99,10 @@ _SEED = int(os.environ.get("TEGH_KILL_SEED", "20261005"))
 _SWEEP = os.environ.get("TEGH_KILL_SWEEP") == "1"
 _PAST_THE_POINT = "after the point where a wrap can still be put back"
 #: The store database and the audit tape only grow; see `test_wrap_transaction.py`.
-_ONLY_GROW = ("store.db", "audit.jsonl")
+#: The launch token and the tool-event mouth's address are the GATEWAY's: the
+#: calls this test makes to see what is served start one, and it writes them.
+#: No wrap writes either, so neither says anything about what a killed wrap left.
+_ONLY_GROW = ("store.db", "audit.jsonl", "gateway-token", "event-mouth.addr")
 #: A second server with the toy's two tools, under its own name.
 MIRROR_GET, MIRROR_LIST = "mirror/get_entry", "mirror/list_entries"
 

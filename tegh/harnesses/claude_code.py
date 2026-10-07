@@ -68,8 +68,10 @@ from tegh.discovery import (
     _resolve_shadowing,
     _string_set,
 )
+from tegh.hooksite import HookSite
 from tegh.interpose import ConfigSite, UnwritableSource
 from tegh.launch import gateway_argv
+from tegh.launch import hook_command as _hook_command
 from tegh.lock import Harness, LockedServer
 from tegh.posture import PostureLine
 
@@ -484,6 +486,33 @@ def gateway_entry(
     # This function contributes only Claude Code's `command` + `args` shape.
     command, *args = gateway_argv(project, launcher=launcher, home=home)
     return {"command": command, "args": args}
+
+
+def hook_site(project_path: str | Path) -> HookSite:
+    """Where the wrap's `PostToolUse` hook goes: the project's LOCAL settings.
+
+    ``<project>/.claude/settings.local.json`` and not ``.claude/settings.json``,
+    which is committable [`docs/references/harnesses/claude-code.md` §3,
+    "Configuration locations"]: the hook's command names one developer's tegh
+    home and launcher, and does not belong in a shared repository. Hooks merge
+    across settings levels rather than replacing each other (same section), so
+    a hook the developer keeps in another file still runs beside it.
+    """
+    project = Path(project_path).expanduser().resolve()
+    return HookSite(path=project / ".claude" / "settings.local.json")
+
+
+def hook_command(
+    project: Path | str, *, launcher: Sequence[str], home: Path | str
+) -> str:
+    """The command string of the wrap's hook entry: `tegh hook` for this project.
+
+    Shared with `launch.hook_argv` for the reason `gateway_entry` shares
+    `gateway_argv`. Claude Code runs a `command` hook through a shell and hands
+    it the event as JSON on stdin [claude-code.md §3, "Hook input"], so the
+    entry is one quoted string and carries nothing but the command.
+    """
+    return _hook_command(project, launcher=launcher, home=home)
 
 
 # ---------------------------------------------------------------------------

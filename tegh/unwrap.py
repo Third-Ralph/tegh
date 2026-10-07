@@ -29,6 +29,12 @@ it, and the list says so. Anything added to it since keeps the file, holding
 just that: the empty entry the wrap made for the project goes, on a line of its
 own. A file that was there before the wrap is never removed.
 
+The hook a wrap added to the harness's settings comes out the same way
+(`hooksite.py`): only the entry that runs tegh's hook command, recorded in the
+backup, and the settings file and its directory when the wrap created them and
+nothing else is left in them. A hook added since is kept. A backup written
+before tegh added a hook records none, and its unwrap has none to take out.
+
 ## The credential ends in exactly one place, and never in none
 
 A relocated credential lives in tegh's store while the project is wrapped. An
@@ -57,7 +63,8 @@ from functools import cache
 from pathlib import Path
 from typing import Callable, Optional
 
-from tegh import interpose
+from tegh import hooksite, interpose
+from tegh.hooksite import HookRestore
 from tegh.interpose import RelocatedReference, SiteRestore, WrapBackup
 from tegh.store import TeghStore, TeghStoreError
 
@@ -95,6 +102,9 @@ class UnwrapPlan:
     #: admissions are in a database this tegh does not read, so the plan and
     #: the report must not say they carry over to the next wrap.
     wrap_again: Optional[str] = None
+    #: The hook entry the wrap added to the harness's settings, as the disk
+    #: holds it now; None when the backup records no hook.
+    hook: Optional[HookRestore] = None
 
     @property
     def already_back(self) -> list[RelocatedReference]:
@@ -170,6 +180,28 @@ class UnwrapPlan:
             actions.extend(
                 Action("keep", "kept", f"{label}  ({name}), added since the wrap")
                 for name in sorted(step.kept)
+            )
+        # The hook the wrap added, by the command it runs. A hook added since
+        # in the same group or the same list stays, and so does the file when
+        # anything is left in it.
+        if self.hook is not None and self.hook.found:
+            label = self.hook.site.label
+            beside = ", keeping the hooks added beside it" if self.hook.shared else ""
+            actions.append(
+                Action(
+                    "remove",
+                    "removed",
+                    f"{label}  (tegh's {self.hook.backup.event} hook entry{beside})",
+                )
+            )
+        if self.hook is not None and self.hook.removes_file:
+            actions.append(
+                Action(
+                    "remove",
+                    "removed",
+                    f"{self.hook.site.path}  (the file itself, which the wrap created "
+                    "and nothing else has been added to)",
+                )
             )
         # After the sites, since it is what is left of them: a file the wrap
         # had to create, with nothing in it once the lines above are done.
@@ -289,6 +321,8 @@ def build_plan(store: TeghStore, project: Path) -> UnwrapPlan:
             f"{exc} The wrap backup is at {backup_path}."
         ) from exc
 
+    hook = hooksite.plan_hook_restore(backup.hook) if backup.hook is not None else None
+
     return UnwrapPlan(
         project=project,
         backup=backup,
@@ -296,6 +330,7 @@ def build_plan(store: TeghStore, project: Path) -> UnwrapPlan:
         secrets_path=secrets_path,
         audit_path=store.audit_path(project),
         sites=sites,
+        hook=hook,
         credentials=interpose.relocated_references(backup),
         wrap_again=(
             None
@@ -365,12 +400,17 @@ def render_report(plan: UnwrapPlan) -> str:
         if count
         else ""
     )
+    hook = (
+        " Its built-in tool calls are no longer reported to tegh."
+        if plan.hook is not None and plan.hook.changes
+        else ""
+    )
     return "\n".join(
         [
             *_lines(plan.actions, done=True),
             "",
             f"unwrapped {plan.project} (wrapped {plan.backup.wrapped_at}). The "
-            f"harness reaches its original servers directly again.{moved} "
+            f"harness reaches its original servers directly again.{hook}{moved} "
             + _left_as_it_was(plan),
         ]
     )
@@ -483,6 +523,12 @@ def _site_progress(plan: UnwrapPlan) -> tuple[list[str], list[str]]:
         except (interpose.InterposeError, OSError):
             landed = False
         (restored if landed else not_restored).append(step.site.label)
+    if plan.hook is not None and plan.hook.changes:
+        try:
+            landed = hooksite.hook_restored(plan.hook)
+        except (interpose.InterposeError, OSError):
+            landed = False
+        (restored if landed else not_restored).append(plan.hook.site.label)
     return restored, not_restored
 
 
@@ -526,8 +572,11 @@ def _restore_sites(plan: UnwrapPlan) -> Optional[str]:
     try:
         # Merges against the files as they are now, writes, then reads every
         # site back and compares. Returning is the verification; see
-        # `interpose.apply_restore`.
+        # `interpose.apply_restore`. The hook comes out after the gateway entry
+        # is gone, the reverse of the order the wrap put them in.
         interpose.apply_restore(plan.sites)
+        if plan.hook is not None and plan.hook.changes:
+            hooksite.apply_hook_restore(plan.hook)
     except (interpose.InterposeError, OSError) as exc:
         return _unfinished_restore(
             plan, "FAILED: the harness config was ", f": {exc}"
