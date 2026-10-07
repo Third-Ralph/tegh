@@ -28,7 +28,8 @@ reads to a user as "handled".
 
 Four gaps are named unconditionally because all four are live: a gateway now
 exists but nothing points at it, so nothing is interposed at runtime; the
-harness's built-in tools are outside anything tegh touches; a REMOTE server
+harness's built-in tools are ungated (tegh's `PostToolUse` hook observes them
+after they run, and stops none); a REMOTE server
 authenticating by HTTP header cannot be wrapped (`header_map` exists in
 the base and tegh does not emit it — the stdio half relocates); and
 MCP-stdio children spawn unconfined (wjatx/ptc-gal-reference#104).
@@ -344,9 +345,10 @@ def _interposition_line(wrapped: bool) -> PostureLine:
             source="tegh/interpose.py; the harness config's own "
             "mcpServers block, read at report time",
             detail="the broker's MCP mouth is interposed, so an "
-            "unadmitted tool is refused by the broker and recorded. NB this covers "
-            "MCP tools only — the agent's built-in shell and file tools are not "
-            "routed through anything, which is the next line",
+            "unadmitted tool is refused by the broker and recorded. NB this gates "
+            "MCP tools only — the agent's built-in shell, file and web tools do not "
+            "go through the gateway and nothing decides them; at most they are "
+            "observed after they ran, which is the next line",
         )
     return PostureLine(
         claim="Nothing is enforced at runtime: a gateway exists, but this "
@@ -392,24 +394,99 @@ def _is_interposed(project: Path, harness: Harness, home: Path | None = None) ->
     )
 
 
-def _invariant_gaps(wrapped: bool = False) -> list[PostureLine]:
+#: The two tests the built-ins line rests on: tegh reaches for no pre-call hook
+#: API anywhere, and the one hook it installs registers for `PostToolUse` alone.
+_BUILT_INS_SOURCE = (
+    "tegh/tests/test_posture.py::test_tegh_names_no_builtin_tool_or_hook_api; "
+    "tegh/tests/test_hooksite.py::test_the_entry_is_post_tool_use_only_and_observes_every_tool"
+)
+
+#: What holds for built-ins whether or not they are observed.
+_NOT_GATED = (
+    "Nothing tegh installs runs before a built-in call or can stop, undo or "
+    "contain one, so a built-in write, shell command or fetch happens whatever "
+    "the broker would have said. Built-ins are contained at posture 2, never "
+    "gated here"
+)
+
+
+def _built_ins_line(observed: Optional[bool]) -> PostureLine:
+    """The agent's built-in tools: ungated always, and observed or not per project.
+
+    `observed` is read from the harness's settings at report time
+    (`_hook_observes`), for the reason `_interposition_line` reads the config:
+    the hook is a per-project fact a report must not assume. The verdict is
+    `no` in all three cases, because what the hook adds is evidence and a
+    taint, never a gate.
+    """
+    if observed:
+        detail = (
+            "OBSERVED, not gated: this project's harness settings carry tegh's "
+            "PostToolUse hook, so after each built-in call the harness runs "
+            "`tegh hook`, which reports it to the gateway's audit tape. A read "
+            "outside the project, a web fetch or a web search taints the turn, so "
+            "the agent's next external write through the gateway is held; a read "
+            "inside the project is recorded and trusted. A read made through the "
+            "shell is recorded as `shell` and taints nothing, and a hook that "
+            "fails or is removed lets calls through unrecorded (the harness fails "
+            "open on every hook failure). " + _NOT_GATED
+        )
+    elif observed is None:
+        detail = (
+            "whether they are even observed is UNKNOWN: the harness settings that "
+            "would carry tegh's PostToolUse hook could not be read. " + _NOT_GATED
+        )
+    else:
+        detail = (
+            "NOT observed either: this project's harness settings carry no tegh "
+            "hook (it was wrapped with --no-hooks, wrapped before tegh installed "
+            "one, or is not wrapped), so built-in calls reach neither the gateway "
+            "nor the tape. Unwrap and wrap again to add it. " + _NOT_GATED
+        )
+    return PostureLine(
+        claim="The agent's built-in tools (shell, file write, network) are ungated",
+        holds="no",
+        # Cites TESTS rather than a grep, and deliberately. The first cut of
+        # this line cited `grep -rniE 'bash|builtin|PreToolUse|hook'`, which
+        # matched its own text the moment it was written, so re-running it
+        # verbatim contradicted the claim it was evidence for. A citation that
+        # a reader cannot re-run is worse than none: it looks checkable. The
+        # first test parses each module's AST and looks only at IDENTIFIERS, so
+        # prose about hooks (this comment included) is invisible to it; the
+        # second reads the one entry a wrap installs.
+        source=_BUILT_INS_SOURCE,
+        detail=detail,
+    )
+
+
+def _hook_observes(project: Path, harness: Harness) -> Optional[bool]:
+    """True when this project's harness settings run tegh's hook for it.
+
+    False for none, and None when the settings cannot be read: unlike
+    `_is_interposed`, either answer is safe to give, because the line's verdict
+    does not move with it, so "unknown" is said rather than rounded down.
+    """
+    try:
+        from tegh.harnesses import hook_config_site  # noqa: PLC0415
+        from tegh.hooksite import commands_at  # noqa: PLC0415
+        from tegh.launch import hook_home_in  # noqa: PLC0415
+
+        site = hook_config_site(harness, project)
+        if site is None:
+            return False
+        commands = commands_at(site)
+    except Exception:  # noqa: BLE001 — any failure means "not known"
+        return None
+    return any(hook_home_in(command, project=project) is not None for command in commands)
+
+
+def _invariant_gaps(
+    wrapped: bool = False, observed: Optional[bool] = False
+) -> list[PostureLine]:
     """The gaps that are live today, stated in the present tense."""
     return [
         _interposition_line(wrapped),
-        PostureLine(
-            claim="The agent's built-in tools (shell, file write, network) are ungated",
-            holds="no",
-            # Cites a TEST rather than a grep, and deliberately. The first cut
-            # of this line cited `grep -rniE 'bash|builtin|PreToolUse|hook'` —
-            # which matched its own text the moment it was written, so re-running
-            # it verbatim contradicted the claim it was evidence for. A citation
-            # that a reader cannot re-run is worse than none: it looks checkable.
-            # The test parses each module's AST and looks only at IDENTIFIERS, so
-            # prose about hooks (this comment included) is invisible to it.
-            source="tegh/tests/test_posture.py::test_tegh_names_no_builtin_tool_or_hook_api",
-            detail="tegh interposes on MCP servers only. Built-ins are confined at "
-            "posture 2 by containment, never by gating them here",
-        ),
+        _built_ins_line(observed),
         PostureLine(
             claim="A REMOTE server that authenticates by HTTP header cannot be wrapped",
             holds="no",
@@ -782,7 +859,7 @@ def build_report(
     from tegh.harnesses import durability_line
 
     wrapped = _is_interposed(project, harness, harness_home)
-    gaps = _invariant_gaps(wrapped)
+    gaps = _invariant_gaps(wrapped, _hook_observes(project, harness))
 
     # Off-cluster this is empty, and deliberately: a laptop report should not
     # grow a row of "no cluster here" lines. The posture itself is NOT raised by
@@ -810,7 +887,9 @@ def build_report(
                 "one machine, and that is now what this is FOR MCP TOOLS. It is not "
                 "posture 2: tegh runs as the same OS user as the agent it serves, so a "
                 "determined same-user adversary reads and writes tegh's home too. "
-                "The agent's built-in shell and file tools are gated by nothing"
+                "The agent's built-in shell, file and web tools are gated by nothing: "
+                "with tegh's hook installed they are observed after they run, and a "
+                "read outside the project taints the turn"
                 if wrapped
                 else "posture 1 means deterministic gating plus taint plus audit honesty "
                 "on one machine. Admission, the signed ledger, the signed lock and a "

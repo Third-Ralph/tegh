@@ -34,9 +34,15 @@ repository's CI. No community-maintained adapter exists.
 
 What the Claude Code row covers, and where it stops:
 
-- **MCP tools only.** tegh rewrites the project's Claude Code configuration so that the gateway is
-  its only MCP server. Claude Code's built-in shell, file and network tools are not routed through
-  anything tegh controls.
+- **MCP tools are gated. Built-in tools are observed, not gated.** tegh rewrites the project's
+  Claude Code configuration so that the gateway is its only MCP server, and the broker decides every
+  MCP call. Claude Code's built-in shell, file and network tools do not go through the gateway and
+  nothing tegh does stops one. `tegh wrap` adds a `PostToolUse` hook to the project's
+  `.claude/settings.local.json`, which reports each built-in call to the audit tape after it ran. A
+  read outside the project, a web fetch or a web search taints the turn, so the agent's next
+  external write through the gateway is held for you. A hook that fails, or that the agent manages
+  to remove, lets calls through unrecorded, and every built-in call now runs one short `tegh hook`
+  process. `tegh wrap --no-hooks` leaves the hook out.
 - **Stdio servers, credentialed ones included.** A literal credential in a stdio server's `env` is
   moved out of the Claude Code configuration into tegh's store and delivered when the server is
   spawned. A remote server that takes a credential in an HTTP header is refused
