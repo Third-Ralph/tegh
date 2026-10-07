@@ -67,14 +67,17 @@ from tegh.discovery import (
     DiscoveredServer,
     DiscoveryResult,
 )
+from tegh import hooksite
 from tegh import interpose
 from tegh import unwrap
-from tegh.harnesses import claude_code
+from tegh.harnesses import claude_code, hook_config_site
+from tegh.hook import HARNESS_CODE as HOOK_HARNESS_CODE
 from tegh.hook import hook_main, mouth_is_listening
 from tegh.launch import (
     BROKER_INHERITED_ENV_VARS,
     DEFAULT_CALL_TIMEOUT_SECONDS,
     gateway_home_in,
+    hook_home_in,
     inherited_env,
     python_module_argv,
     tegh_launcher,
@@ -132,6 +135,11 @@ HARNESS_ALIASES = {
 }
 
 _CEREMONY = python_module_argv("safe_agents.broker.mcp.commands")
+
+#: The reported reads this project's manifest trusts: a built-in file read
+#: inside the project, as `tegh hook` classifies it (`hook.py`). The source id
+#: is the broker's `harness:<harness>/<tool_class>/<locality>`.
+TRUSTED_HARNESS_READS: tuple[str, ...] = (f"harness:{HOOK_HARNESS_CODE}/file-read/project",)
 _PROPOSAL_TTL_HOURS = "1"
 
 #: Answer for one tool in the batched review.
@@ -395,6 +403,15 @@ def _synthesize_manifest(
             # says it out loud.
             "caps": {"actions_per_utc_day": daily_cap},
             "allowlists": {"tools": grant_classes},
+            # A read the harness's own Read tool made INSIDE the project is
+            # recorded and does not taint the turn; every other reported read
+            # (a file under the home directory or elsewhere, a web fetch, a web
+            # search) taints it, so the next external write is held. The
+            # project is the code the agent was asked to work on, and taint on
+            # every read of it would hold every write it makes. Trusting it is
+            # a consumer decision, made here and named as a source id built
+            # from codes, never a path (the platform's GATEWAY.md G24).
+            "trusted_read_sources": list(TRUSTED_HARNESS_READS),
         },
         # Every constructible server must also be wired as a connector — the
         # base refuses a construction block nothing wires, because a server the
@@ -1298,6 +1315,8 @@ def _wrap_again(args: argparse.Namespace, store: TeghStore, project: Path) -> st
         said += f" --harness-home {_path(args.harness_home)}"
     if args.no_rewrite:
         said += " --no-rewrite"
+    if args.no_hooks:
+        said += " --no-hooks"
     return said + _with_home(args, store)
 
 
@@ -1629,6 +1648,11 @@ def _prepare_wrap(
     # a proposal. Reading the sites now also moves the format round-trip
     # refusal to the same early point.
     sites, gateway_site = adapter.config_sites(project, home=harness_home)
+    # The hook's settings file is read here too, for the same reason: a file
+    # tegh cannot write back unchanged refuses the wrap before any ceremony.
+    hook_site = None if args.no_rewrite or args.no_hooks else adapter.hook_site(project)
+    if hook_site is not None:
+        hooksite.check_site(hook_site)
     decisions = _classify_config_values(
         store,
         project,
@@ -1772,6 +1796,14 @@ def _prepare_wrap(
             ),
             unwritable=adapter.unwritable_sources(result),
             cleared_config=decisions.cleared,
+            hook=(
+                hooksite.plan_hook(
+                    hook_site,
+                    adapter.hook_command(project, launcher=tegh_launcher(), home=store.home),
+                )
+                if hook_site is not None
+                else None
+            ),
         )
     return _PreparedWrap(
         lock=TeghLock(
@@ -1792,10 +1824,10 @@ def _write_wrap(
     project: Path,
     harness: Harness,
 ) -> None:
-    """Write the files of a prepared wrap: manifest, lock, backup, config.
+    """Write the files of a prepared wrap: manifest, lock, backup, config, hook.
 
-    In that order, with the harness config LAST, and all of it before the
-    commit point: an error or a signal between two of these is rolled back
+    In that order, with the harness config LAST (its `mcpServers` blocks, then
+    the hook entry in its settings), and all of it before the commit point: an error or a signal between two of these is rolled back
     like any other. What the order is for is the stop nothing can roll back,
     the process killed outright or the machine lost, and what each such stop
     leaves:
@@ -1856,7 +1888,9 @@ def _write_wrap(
     # before anything else, because the credentials they held are otherwise
     # only in the credential map this same rollback empties (`transaction.py`).
     transaction.record(
-        *dict.fromkeys(site.path for site in plan.sites), restore_first=True
+        *dict.fromkeys(site.path for site in plan.sites),
+        *([plan.hook.site.path] if plan.hook is not None else []),
+        restore_first=True,
     )
     interpose.write_interposition(plan)
 
@@ -1914,11 +1948,28 @@ def _report_wrapped(
     if not plan.displaced:
         print("  (no servers were configured; the gateway is simply added)")
     print(f"  gateway   {plan.gateway_site.label} as {plan.gateway_name!r}")
+    if plan.hook is not None:
+        added = "already there, not added again" if plan.hook.present else "added"
+        print(f"  hook      {plan.hook.site.label} ({hooksite.HOOK_EVENT}, {added})")
     print(f"  backup    {backup_path}")
     # Named here because this is the moment it starts being written, and because
     # a payoff nothing points at is a payoff nobody finds: every brokered
     # call from now on lands on this tape.
     print(f"  audit     {store.audit_path(project)}")
+    if plan.hook is not None:
+        print(
+            "\n  The agent's built-in tools (shell, file reads and writes, web fetch) "
+            "are\n  OBSERVED, not gated: after each one the harness runs `tegh hook`, "
+            "one short\n  process per call, which reports it to the gateway's tape. A "
+            "read outside this\n  project taints the turn, so the agent's next external "
+            "write through the\n  gateway is held. Nothing stops a built-in call, and a "
+            "hook that fails lets\n  it through unrecorded. Containment is posture 2."
+        )
+    else:
+        print(
+            "\n  --no-hooks: the agent's built-in tools (shell, file reads and writes, "
+            "web\n  fetch) are neither gated nor observed. Only MCP calls reach the broker."
+        )
     for source in plan.unwritable:
         print(
             f"\n  !! {source.scope.value}: {source.detail}\n"
@@ -2262,6 +2313,31 @@ def _signature_line(loaded: LoadedLock) -> str:
     )
 
 
+def _built_in_tools_line(project: Path) -> str:
+    """Whether this project's built-in tool calls reach the tape, read off the disk.
+
+    Read from the harness's settings, as `_is_interposed` reads its config: the
+    question is what the harness would run. Either way the answer says the
+    calls are not gated, because nothing tegh installs gates them.
+    """
+    site = hook_config_site(Harness.CLAUDE_CODE, project)
+    if site is None:
+        return "built-in tools: NOT observed and not gated"
+    try:
+        commands = hooksite.commands_at(site)
+    except (interpose.InterposeError, OSError):
+        return (
+            f"built-in tools: UNKNOWN whether observed ({site.path} could not be "
+            "read); not gated either way"
+        )
+    if any(hook_home_in(command, project=project) is not None for command in commands):
+        return (
+            "built-in tools: OBSERVED, not gated — tegh's PostToolUse hook in "
+            f"{site.path} reports each call to the tape; none is stopped"
+        )
+    return f"built-in tools: NOT observed and not gated — no tegh hook in {site.path}"
+
+
 def status_command(args: argparse.Namespace) -> int:
     project = Path(args.project).expanduser().resolve()
     store = TeghStore(home=Path(args.home).expanduser() if args.home else tegh_home())
@@ -2273,6 +2349,7 @@ def status_command(args: argparse.Namespace) -> int:
     lock = loaded.lock
     print(f"{loaded.path}  (format v{lock.format_version}, generated {lock.generated_at})")
     print(f"  signature: {_signature_line(loaded)}")
+    print(f"  {_built_in_tools_line(project)}")
     for server in lock.servers:
         target = server.url or " ".join(filter(None, [server.command, *server.args]))
         print(
@@ -2342,7 +2419,10 @@ def diff_command(args: argparse.Namespace) -> int:
     # the ones a human signed is a precondition for reading the diff at all —
     # printed here rather than left to `status`, which a `diff` user has no
     # reason to have run.
-    print(f"lock signature: {_signature_line(loaded)}\n")
+    print(f"lock signature: {_signature_line(loaded)}")
+    # Not drift: the lock pins MCP tools only. Said here because a reader of a
+    # diff is asking what reaches the broker, and built-in calls are half of it.
+    print(f"{_built_in_tools_line(project)}\n")
     drifted = 0
     withdrawn = 0
     unchanged = 0
@@ -2480,6 +2560,16 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
             "admit and write the lock, but do NOT point the harness at the "
             "gateway. Nothing is interposed and the agent keeps reaching its "
             "servers directly — useful to review a wrap before committing to it"
+        ),
+    )
+    wrap.add_argument(
+        "--no-hooks",
+        action="store_true",
+        help=(
+            "do not add the PostToolUse hook that reports the agent's built-in "
+            "tool calls (shell, file, web) to the gateway's tape. Without it "
+            "those calls are neither gated nor observed. With it they are "
+            "observed and still not gated, and each one runs one short process"
         ),
     )
 

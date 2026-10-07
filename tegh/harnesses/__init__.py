@@ -71,3 +71,16 @@ def gateway_config_site(harness: "Harness", project, home=None):
         _, gateway_site = config_sites(project, home=home)
         return gateway_site
     return None
+
+
+def hook_config_site(harness: "Harness", project):
+    """Where this harness's tool-event hook lives, or None if tegh installs none there.
+
+    The reading `tegh posture`, `status` and `diff` use to say whether built-in
+    tool calls are observed for a project. None reads as "not observed".
+    """
+    if harness == "claude-code":
+        from tegh.harnesses.claude_code import hook_site  # noqa: PLC0415
+
+        return hook_site(project)
+    return None

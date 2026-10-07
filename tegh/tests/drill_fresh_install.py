@@ -6,7 +6,8 @@
 It drives the `tegh` console script as subprocesses through the flow of
 `docs/tegh-quickstart.md` sections 3 to 8: init, wrap with a reviewed admission,
 a call that executes, a call that is held and then released, a call that is
-denied, the tape read back, and the unwrap. Each step asserts on what the
+denied, a built-in tool call reported by the wrap's hook and the write it
+holds, the tape read back, and the unwrap. Each step asserts on what the
 command did, and the first step that fails prints the command, its exit status
 and its output, then exits 1.
 
@@ -19,8 +20,12 @@ unless the credential tegh relocated reaches it.
 answers are piped, so nobody reads a classification or decides anything, and the
 review is where a person's time goes. The elapsed figure printed at the end is
 machine time and is labelled as such. The measurement with a person in it is
-#2. It also says nothing about Claude Code itself: no harness is started, and
-`tegh call` stands in for the harness's MCP client.
+#2. It also says nothing about Claude Code itself: no Claude Code runs here or in
+CI. `tegh call` and a small stdio client stand in for the harness's MCP client,
+and a replayed `PostToolUse` event (`events/post_tool_use_read.json`, built from
+the field list in the harness reference, not captured) stands in for the event
+Claude Code would hand the hook. The hook command itself is the one the wrap
+wrote, run through a shell as Claude Code runs a command hook.
 
 **Why a script and not a pytest file.** It has to run against a non-editable
 install on a pristine runner, where there is no pytest and where `tegh.tests` is
@@ -39,12 +44,14 @@ import argparse
 import hashlib
 import json
 import os
+import queue
 import re
 import shutil
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -61,6 +68,19 @@ EXIT_COULD_NOT_START = 2
 #: built distribution and `-m tegh.tests.toys...` does not resolve against a
 #: non-editable install.
 TOY_SERVER = Path(__file__).resolve().parent / "toys" / "credentialed_mcp_server.py"
+
+#: The `PostToolUse` event replayed to the wrap's hook, read by path from this
+#: checkout for the reason the toy server is. A stand-in for Claude Code.
+HOOK_EVENT = Path(__file__).resolve().parent / "events" / "post_tool_use_read.json"
+#: The one hook event a wrap installs, and the file it goes into.
+HOOK_EVENT_NAME = "PostToolUse"
+SETTINGS_RELATIVE = Path(".claude") / "settings.local.json"
+#: What the tape calls a reported built-in call, and the two reasons a write to
+#: `get_entry` is held: alone in its turn, and after a reported read.
+OBSERVED_RECORD = ("harness-tool", "file-read", "abstain", "observed")
+HELD_ALONE = "irreversible external write"
+HELD_TAINTED = "tainted external write"
+MCP_PROTOCOL_VERSION = "2025-06-18"
 
 SERVER_ID = "vendor"
 GATEWAY_SERVER_ID = "tegh"
@@ -106,7 +126,7 @@ INTERPRETER_NAMES = ("python", "python3")
 #: fails one step with its output, and does not sit until the CI job is killed.
 COMMAND_TIMEOUT_SECONDS = 180.0
 
-TIMED_STEPS = "steps 2 to 10"
+TIMED_STEPS = "steps 2 to 11"
 STEP_SUMMARY_ENV = "GITHUB_STEP_SUMMARY"
 
 
@@ -272,6 +292,8 @@ class Drill:
             FIXTURE_KEY not in rewritten,
             "the credential is still in the harness config after the wrap",
         )
+        self.expect("hook      hooks:" in ran.stdout, "stdout names no hook line")
+        self.hook_command()  # raises a step failure when the entry is not there
         # The config check alone cannot tell a relocated credential from one the
         # reviewer called configuration: the rewrite removes the server entry
         # either way, and a value carried as configuration lands in the
@@ -328,6 +350,84 @@ class Drill:
             "refused by the broker" in ran.stdout, "stdout does not say refused by the broker"
         )
 
+    def hook_command(self) -> str:
+        """The command of the one hook the wrap put in the project's local settings."""
+        path = self.project / SETTINGS_RELATIVE
+        try:
+            groups = json.loads(path.read_text(encoding="utf-8"))["hooks"][HOOK_EVENT_NAME]
+            (group,) = groups
+            (entry,) = group["hooks"]
+            return str(entry["command"])
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise StepFailed(
+                f"{path} does not hold one {HOOK_EVENT_NAME} hook entry ({exc})"
+            ) from None
+
+    def observe_a_built_in_read(self) -> None:
+        """A replayed Read outside the project, reported by the wrap's hook, holds the write.
+
+        One gateway, started with the command the wrap wrote and the drill's
+        environment, as the harness starts it; one MCP session on it. The hook
+        command the wrap wrote runs through a shell with the replayed event on
+        stdin, and reports to that gateway's tool-event mouth. The write that
+        follows in the same session is held as TAINTED, where step 5 held the
+        same write alone in its turn as irreversible: the reason on the tape is
+        what tells the report's effect from the classification's.
+        """
+        entry = json.loads(self.config.read_text(encoding="utf-8"))["projects"][
+            str(self.project)
+        ]["mcpServers"][GATEWAY_SERVER_ID]
+        target = self.home / "notes" / "outside-the-project.md"
+        event = json.loads(HOOK_EVENT.read_text(encoding="utf-8"))
+        event.update(cwd=str(self.project), tool_input={"file_path": str(target)})
+        with _StdioGateway([entry["command"], *entry["args"]], self.env, self.project) as gateway:
+            gateway.initialize()
+            gateway.wait_for(lambda: bool(list((self.home / ".tegh").glob(
+                "projects/*/event-mouth.addr"
+            ))), "the gateway never wrote its tool-event mouth address")
+            hook = subprocess.run(  # noqa: S603 - the command the wrap wrote, as a harness runs it
+                ["/bin/sh", "-c", self.hook_command()],
+                input=json.dumps(event),
+                capture_output=True,
+                text=True,
+                env=self.env,
+                cwd=self.project,
+                timeout=COMMAND_TIMEOUT_SECONDS,
+                check=False,
+            )
+            self.last = Ran(("/bin/sh", "-c", "<the wrap's hook command>"),
+                            hook.returncode, hook.stdout, hook.stderr)
+            self.expect(
+                (hook.returncode, hook.stdout, hook.stderr) == (0, "", ""),
+                "the hook did not exit 0 silently",
+            )
+            result = gateway.call_tool(HELD_TOOL, json.loads(ENTRY_ARGS))
+        self.expect(result.get("isError") is True, "the write after the reported read executed")
+        text = " ".join(
+            block.get("text", "") for block in result.get("content", []) if isinstance(block, dict)
+        )
+        self.expect("held for approval" in text, "the write is not held for approval")
+
+        ran = self.run("audit", "--json", "--project", str(self.project))
+        self.expect_exit(ran, 0)
+        records = json.loads(ran.stdout)["records"]
+        observed = [
+            index for index, r in enumerate(records)
+            if (r.get("tool"), r.get("op"), r.get("decision"), r.get("outcome")) == OBSERVED_RECORD
+        ]
+        self.expect(len(observed) == 1, f"{len(observed)} observed built-in read(s), expected 1")
+        held = [
+            (r.get("reason"), index) for index, r in enumerate(records)
+            if (r.get("op"), r.get("outcome")) == ("get_entry", "held")
+        ]
+        self.expect(
+            [reason for reason, _ in held] == [HELD_ALONE, HELD_TAINTED],
+            f"the held get_entry records give {[reason for reason, _ in held]}, expected "
+            f"one {HELD_ALONE!r} (step 5) then one {HELD_TAINTED!r} after the report",
+        )
+        self.expect(observed[0] < held[1][1], "the observed read is not before the tainted hold")
+        self.expect(str(target) not in ran.stdout, "the tape spells the path the hook read")
+
     def verify_the_chain(self) -> None:
         ran = self.run("audit", "--verify", "--project", str(self.project))
         self.expect_exit(ran, 0)
@@ -373,6 +473,10 @@ class Drill:
             self.config.read_bytes() == self.original_config,
             "the harness config is not byte-identical to the original",
         )
+        self.expect(
+            not (self.project / SETTINGS_RELATIVE.parent).exists(),
+            "the project's .claude directory the wrap created for its hook is still there",
+        )
         # The credential went back into the config, so tegh must not keep its
         # own copy. Searched for across the whole tree, as after the wrap: the
         # store is one place a copy could be left, and not the only one.
@@ -391,6 +495,88 @@ class Drill:
         )
 
 
+class _StdioGateway:
+    """A minimal MCP client over stdio: initialize, one tools/call, close.
+
+    Standard library only, for the reason this file is. It speaks newline-
+    delimited JSON-RPC, which is MCP's stdio framing, and reads replies on a
+    thread so that every wait is bounded.
+    """
+
+    def __init__(self, argv: list[str], env: dict, cwd: Path) -> None:
+        self.argv = argv
+        self.env = env
+        self.cwd = cwd
+        self.lines: "queue.Queue[str]" = queue.Queue()
+        self.next_id = 1
+
+    def __enter__(self) -> "_StdioGateway":
+        self.child = subprocess.Popen(  # noqa: S603 - the command the wrap wrote
+            self.argv, env=self.env, cwd=self.cwd, text=True,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        threading.Thread(target=self._read, daemon=True).start()
+        return self
+
+    def _read(self) -> None:
+        for line in self.child.stdout:
+            self.lines.put(line)
+
+    def __exit__(self, *exc: object) -> None:
+        try:
+            self.child.stdin.close()
+            self.child.wait(timeout=COMMAND_TIMEOUT_SECONDS)
+        except (OSError, subprocess.TimeoutExpired):
+            self.child.kill()
+            self.child.wait()
+
+    def _fail(self, why: str) -> StepFailed:
+        stderr = ""
+        if self.child.poll() is not None:
+            stderr = self.child.stderr.read()
+        return StepFailed(why, Ran(tuple(self.argv), self.child.returncode, "", stderr))
+
+    def _send(self, frame: dict) -> None:
+        self.child.stdin.write(json.dumps(frame) + "\n")
+        self.child.stdin.flush()
+
+    def request(self, method: str, params: dict) -> dict:
+        request_id = self.next_id
+        self.next_id += 1
+        self._send({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
+        deadline = time.monotonic() + COMMAND_TIMEOUT_SECONDS
+        while time.monotonic() < deadline:
+            try:
+                frame = json.loads(self.lines.get(timeout=0.2))
+            except queue.Empty:
+                if self.child.poll() is not None:
+                    raise self._fail(f"the gateway exited before answering {method}") from None
+                continue
+            if frame.get("id") == request_id:
+                if "error" in frame:
+                    raise self._fail(f"{method} returned a JSON-RPC error: {frame['error']}")
+                return frame["result"]
+        raise self._fail(f"no answer to {method} within {COMMAND_TIMEOUT_SECONDS:g}s")
+
+    def initialize(self) -> None:
+        self.request("initialize", {
+            "protocolVersion": MCP_PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "tegh-drill", "version": "0"},
+        })
+        self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+
+    def call_tool(self, name: str, arguments: dict) -> dict:
+        return self.request("tools/call", {"name": name, "arguments": arguments})
+
+    def wait_for(self, ready: Callable[[], bool], why: str) -> None:
+        deadline = time.monotonic() + COMMAND_TIMEOUT_SECONDS
+        while not ready():
+            if self.child.poll() is not None or time.monotonic() > deadline:
+                raise self._fail(why)
+            time.sleep(0.05)
+
+
 def _text(captured: object) -> str:
     """What a timed-out child had written, whichever type subprocess hands back."""
     if isinstance(captured, bytes):
@@ -407,10 +593,16 @@ def _steps(drill: Drill) -> list[tuple[str, Callable[[], None]]]:
         (f"tegh call {HELD_TOOL}: held for approval", drill.call_the_held_write),
         ("tegh approve: RELEASED by a local-solo approver", drill.approve),
         (f"tegh call {UNADMITTED_TOOL}: refused by the broker", drill.call_the_unadmitted_tool),
+        (
+            "tegh hook, fed a REPLAYED PostToolUse Read outside the project (a stand-in "
+            f"for Claude Code): observed, and the next {HELD_TOOL} held as tainted",
+            drill.observe_a_built_in_read,
+        ),
         ("tegh audit --verify: CHAIN CONSISTENT", drill.verify_the_chain),
         ("tape records: one deny, and the hold and its release share an intent", drill.read_the_tape),
         (
-            "tegh unwrap: harness config restored byte for byte, credential gone from tegh's store",
+            "tegh unwrap: harness config restored byte for byte, hook and its directory "
+            "gone, credential gone from tegh's store",
             drill.unwrap,
         ),
     ]

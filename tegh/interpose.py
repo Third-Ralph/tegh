@@ -67,11 +67,14 @@ import os
 import stat
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, Mapping, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional, Sequence
 
 from tegh.configvalues import SECRET_BEARING_BLOCKS, literal_fields
 from tegh.discovery import ConfigScope
 from tegh.launch import gateway_home_in
+
+if TYPE_CHECKING:  # pragma: no cover - typing only; `hooksite` imports this module
+    from tegh.hooksite import HookBackup, HookInstall
 
 #: The serialization tegh writes back. Not a style preference — it is the one
 #: form observed to reproduce a real `~/.claude.json` byte-for-byte, and
@@ -169,6 +172,11 @@ class InterposePlan:
     gateway_entry: dict[str, Any] = field(default_factory=dict)
     sites: list[ConfigSite] = field(default_factory=list)
     unwritable: list[UnwritableSource] = field(default_factory=list)
+    #: The harness hook the wrap adds beside the gateway entry (`hooksite.py`),
+    #: or None for a wrap that adds none (`--no-hooks`, or an adapter with no
+    #: hook). Written after the `mcpServers` blocks, recorded in the backup, and
+    #: taken out by the unwrap like the gateway entry.
+    hook: Optional["HookInstall"] = None
 
     @property
     def displaced_count(self) -> int:
@@ -334,6 +342,11 @@ class WrapBackup:
     #: this was recorded; see `_gateway_name_at` for how that one is read.
     gateway_name: Optional[str] = None
     gateway_site: Optional[str] = None
+    #: The hook entry the wrap added to the harness's settings, with what
+    #: existed around it (`hooksite.HookBackup`). None in a backup of a wrap
+    #: that added no hook, which includes every backup written before tegh
+    #: added one: such an unwrap has no hook to take out.
+    hook: Optional["HookBackup"] = None
 
     def to_json(self) -> str:
         gateway = (
@@ -341,12 +354,14 @@ class WrapBackup:
             if self.gateway_name is not None
             else {}
         )
+        hook = {"hook": self.hook.to_dict()} if self.hook is not None else {}
         return json.dumps(
             {
                 "project": self.project,
                 "harness": self.harness,
                 "wrapped_at": self.wrapped_at,
                 **gateway,
+                **hook,
                 "sites": [
                     {
                         "scope": s.scope,
@@ -377,8 +392,11 @@ class WrapBackup:
             raise BackupUnreadable(
                 f"it is not valid JSON ({exc.msg}, line {exc.lineno})"
             ) from exc
+        from tegh.hooksite import HookBackup  # noqa: PLC0415 - cycle
+
         try:
             gateway = data.get("gateway") or {}
+            hook = data.get("hook")
             backup = cls(
                 project=str(data["project"]),
                 harness=str(data["harness"]),
@@ -396,6 +414,7 @@ class WrapBackup:
                 ],
                 gateway_name=gateway.get("name"),
                 gateway_site=gateway.get("site"),
+                hook=HookBackup.from_dict(hook) if hook is not None else None,
             )
             # Walks every credential reference, which is what indexes `leaf`
             # and `field` later.
@@ -690,6 +709,7 @@ def plan_interposition(
     gateway_name: str = "tegh",
     unwritable: Sequence[UnwritableSource] = (),
     cleared_config: Optional[Mapping[str, str]] = None,
+    hook: Optional["HookInstall"] = None,
 ) -> InterposePlan:
     """Compute what a wrap would displace, reading every site and writing none."""
     plan = InterposePlan(
@@ -698,6 +718,7 @@ def plan_interposition(
         gateway_entry=dict(gateway_entry),
         sites=list(sites),
         unwritable=list(unwritable),
+        hook=hook,
     )
     for site in sites:
         _, block, _ = _load_site(site)
@@ -752,6 +773,11 @@ def backup_of(
                 file_existed=document is not None,
             )
         )
+    hook = None
+    if plan.hook is not None:
+        from tegh.hooksite import backup_of_hook  # noqa: PLC0415 - cycle
+
+        hook = backup_of_hook(plan.hook)
     return WrapBackup(
         project=str(project),
         harness=harness,
@@ -759,6 +785,7 @@ def backup_of(
         sites=originals,
         gateway_name=plan.gateway_name,
         gateway_site=plan.gateway_site.label,
+        hook=hook,
     )
 
 
@@ -781,7 +808,13 @@ def write_backup(path: Path, backup: WrapBackup) -> None:
 
 
 def write_interposition(plan: InterposePlan) -> None:
-    """Displace every real server and install the gateway. The second half."""
+    """Displace every real server, install the gateway, then the hook. The second half.
+
+    The hook goes last. It reports built-in tool calls to the gateway's mouth,
+    so a hook installed beside a config that does not yet name the gateway
+    would report to nothing; the other order leaves, at worst, a gateway with
+    no hook, which observes nothing it did not observe before.
+    """
     if plan.gateway_site is None:
         raise InterposeError("no gateway site — nothing to interpose into")
     for site in plan.sites:
@@ -792,6 +825,10 @@ def write_interposition(plan: InterposePlan) -> None:
             _write_block(site, {plan.gateway_name: dict(plan.gateway_entry)}, prune_empty=False)
         else:
             _write_block(site, {}, prune_empty=True)
+    if plan.hook is not None:
+        from tegh.hooksite import write_hook  # noqa: PLC0415 - cycle
+
+        write_hook(plan.hook)
 
 
 def apply_interposition(
