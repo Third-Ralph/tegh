@@ -24,7 +24,7 @@ requires-python = ">=3.12"
 # not a test one: `tegh gateway` execs the broker gateway, whose MCP host client imports the SDK to
 # reach the wrapped project's servers.
 dependencies = [
-    "safe-agents[mcp]==0.73.1",
+    "safe-agents[mcp]==0.75.0",
     # Direct imports of our own; the platform happens to require these too, but tegh should not
     # lean on that. pydantic for the lock models, cryptography for lock signing (TL2/TL3).
     "pydantic>=2.13.4",
