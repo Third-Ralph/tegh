@@ -3,9 +3,10 @@
     <launcher> hook --project /abs/project --home /abs/tegh-home   < event.json
 
 A wrapped Claude Code's own tools (Read, Bash, Write, Edit, WebFetch, WebSearch
-and the rest) never become MCP calls, so the gateway never sees them. `tegh wrap
-claude` installs this command as a `PostToolUse` hook in the project's local
-settings, and Claude Code runs it after each such call. It classifies the call
+and the rest) never become MCP calls, so the gateway never sees them. Nor does it
+see a call to an MCP server the wrap could not displace (a plugin's, or a
+claude.ai connector). `tegh wrap claude` installs this command as a `PostToolUse`
+hook in the project's local settings, and Claude Code runs it after each such call. It classifies the call
 into the broker's closed vocabulary and posts the classification to the mouth the
 project's gateway opened beside its stdio MCP surface. The broker records it on
 the audit tape and, when the call read content from somewhere the project's
@@ -20,6 +21,28 @@ prints nothing on stdout, because a hook's stdout is parsed by the harness and a
 exit of 2 would put text in front of the model. Built-in tools stay ungated and
 uncontained. What this adds is that they are SEEN, and that a read outside the
 project counts against the turn the way an MCP read does.
+
+## What is reported, and what is not
+
+Three rules, in this order (`report_of`):
+
+1. A tool the gateway serves (`GATEWAY_TOOL_PREFIX`) is not reported. The broker
+   decided that call and recorded it, and a second record would say it happened
+   twice.
+2. A tool listed in `HARNESS_INTERNAL_TOOLS` is not reported. See the rule there
+   for what earns a listing. Silence is only ever a named row.
+3. Everything else is reported. A built-in tool is classified by `TOOL_TABLE`,
+   and a name no table lists is `other`, so a tool nobody has heard of is on the
+   tape by default.
+
+An MCP tool the gateway does not serve falls under rule 3. This command knows
+nothing about that server, so it cannot say whether the call read or wrote. It
+is reported as `other` under a harness code of its own, `claude-code-mcp`, which
+is what names it on the tape as an MCP call that went around the broker. **It
+does not taint the turn**: the platform's mouth taints on its read classes only,
+and calling such a call a read would put a false statement on the tape. The
+class that would let it taint is asked for upstream
+(https://github.com/wjatx/ptc-gal-reference/issues/187).
 
 ## Every failure fails open, and that is not a choice made here
 
@@ -74,9 +97,45 @@ HARNESS_CODE = "claude-code"
 #: The one hook event this command reports. Anything else is ignored.
 HOOK_EVENT = "PostToolUse"
 
-#: Tool names with this prefix are MCP tools, which reach tegh's gateway as MCP
-#: calls and are brokered there. Reporting them here would record them twice.
+#: The harness code for an MCP call that did not go through tegh's gateway. The
+#: mouth's tool classes are a closed set with no member for such a call, and its
+#: harness code is not (`broker/GATEWAY.md` G23), so until the platform has a
+#: class for it this code is what identifies the call on the tape. It names no
+#: `trusted_read_sources` entry tegh writes, so nothing trusts it.
+UNBROKERED_MCP_HARNESS_CODE = "claude-code-mcp"
+
+#: Claude Code names every MCP tool `mcp__<server>__<tool>`.
 MCP_TOOL_PREFIX = "mcp__"
+
+#: The name a wrap gives the gateway's entry (`tegh/interpose.py`,
+#: `InterposePlan.gateway_name`; a test holds the two equal). Spelled here and
+#: not imported, because this process loads as little as it can.
+GATEWAY_SERVER_NAME = "tegh"
+
+#: Tools the gateway serves. Their calls are brokered there and recorded by the
+#: broker, so reporting one here would record it twice.
+GATEWAY_TOOL_PREFIX = f"{MCP_TOOL_PREFIX}{GATEWAY_SERVER_NAME}__"
+
+#: Claude Code tools that are not reported at all.
+#:
+#: The rule for a row: the tool reaches no file, process or network of its own
+#: and acts only on what the harness already holds in the session, AND that was
+#: observed or is documented, with the source named beside the row. A tool that
+#: is merely noisy does not qualify, and neither does one nobody has looked at:
+#: a name this set does not list is reported (as `other` when `TOOL_TABLE` does
+#: not list it either), so the next internal tool Claude Code adds shows up on
+#: the tape until someone decides it belongs here.
+#:
+#: What a row costs: the tape is silent about that tool. For `ToolSearch` that
+#: includes the fact that it puts a deferred tool's description in front of the
+#: model, and for a server outside the gateway nobody admitted that description.
+HARNESS_INTERNAL_TOOLS = frozenset(
+    {
+        # Loads the schema of a deferred tool from the harness's own registry.
+        # Observed 2026-10-07 on Claude Code 2.1.292 (Third-Ralph/tegh#27).
+        "ToolSearch",
+    }
+)
 
 #: Claude Code's built-in tool name, mapped to the broker's closed `tool_class`
 #: and to the `tool_input` keys that name the call's subject, first match wins.
@@ -196,23 +255,46 @@ def locality(
     return "outside"
 
 
+def served_by_gateway(event: Mapping[str, Any]) -> bool:
+    """Whether the event's tool is one the project's gateway serves.
+
+    By the tool name's prefix. Where Claude Code also says which server the
+    tool came from (`mcp_server`, v2.1.274 or later; reference §3, "Hook
+    input"), that name has to agree, because a server named `tegh__x` would
+    otherwise wear the gateway's prefix and go unreported.
+    """
+    name = event.get("tool_name")
+    if not isinstance(name, str) or not name.startswith(GATEWAY_TOOL_PREFIX):
+        return False
+    server = event.get("mcp_server")
+    if isinstance(server, Mapping) and isinstance(server.get("name"), str):
+        return server["name"] == GATEWAY_SERVER_NAME
+    return True
+
+
 def report_of(
     event: Mapping[str, Any], *, project: Path, home: Path
 ) -> Optional[dict[str, str]]:
     """The report for one hook event, or None when the event is not reported.
 
-    None for any event that is not `PostToolUse`, and for an MCP tool, whose
-    call the gateway already brokered. Otherwise exactly five keys or four:
-    `result_digest` is left out when the event carries no tool response.
+    None for any event that is not `PostToolUse`, for a tool the gateway
+    serves, and for a listed harness-internal tool (the module docstring, "What
+    is reported"). Otherwise exactly five keys or four: `result_digest` is left
+    out when the event carries no tool response. An MCP tool the gateway does
+    not serve is reported under `UNBROKERED_MCP_HARNESS_CODE`, with its own
+    name as the subject.
     """
     if event.get("hook_event_name") != HOOK_EVENT:
         return None
     name = event.get("tool_name")
-    if not isinstance(name, str) or name.startswith(MCP_TOOL_PREFIX):
+    if not isinstance(name, str):
         return None
+    if served_by_gateway(event) or name in HARNESS_INTERNAL_TOOLS:
+        return None
+    unbrokered_mcp = name.startswith(MCP_TOOL_PREFIX)
     tool_input = event.get("tool_input")
     report = {
-        "harness": HARNESS_CODE,
+        "harness": UNBROKERED_MCP_HARNESS_CODE if unbrokered_mcp else HARNESS_CODE,
         "tool_class": tool_class(name),
         "locality": locality(name, tool_input, project=project, home=home),
         "subject_digest": digest(subject(name, tool_input)),

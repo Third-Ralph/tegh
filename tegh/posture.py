@@ -394,11 +394,15 @@ def _is_interposed(project: Path, harness: Harness, home: Path | None = None) ->
     )
 
 
-#: The two tests the built-ins line rests on: tegh reaches for no pre-call hook
-#: API anywhere, and the one hook it installs registers for `PostToolUse` alone.
+#: The tests the built-ins line rests on: tegh reaches for no pre-call hook
+#: API anywhere, the one hook it installs registers for `PostToolUse` alone,
+#: and what that hook does with an MCP call the gateway did not serve and with
+#: a harness-internal tool is read off a real tape.
 _BUILT_INS_SOURCE = (
     "tegh/tests/test_posture.py::test_tegh_names_no_builtin_tool_or_hook_api; "
-    "tegh/tests/test_hooksite.py::test_the_entry_is_post_tool_use_only_and_observes_every_tool"
+    "tegh/tests/test_hooksite.py::test_the_entry_is_post_tool_use_only_and_observes_every_tool; "
+    "tegh/tests/test_hook_e2e.py::"
+    "test_mcp_calls_on_the_tape_one_record_each_and_the_unbrokered_one_named"
 )
 
 #: What holds for built-ins whether or not they are observed.
@@ -427,9 +431,15 @@ def _built_ins_line(observed: Optional[bool]) -> PostureLine:
             "outside the project, a web fetch or a web search taints the turn, so "
             "the agent's next external write through the gateway is held; a read "
             "inside the project is recorded and trusted. A read made through the "
-            "shell is recorded as `shell` and taints nothing, and a hook that "
-            "fails or is removed lets calls through unrecorded (the harness fails "
-            "open on every hook failure). " + _NOT_GATED
+            "shell is recorded as `shell` and taints nothing. A call to an MCP "
+            "tool the gateway does not serve (a plugin's server, a claude.ai "
+            "connector) is recorded as `claude-code-mcp other`, which names it as "
+            "a call that went around the broker, and taints nothing: tegh cannot "
+            "tell whether it read, and the platform has no class for it yet "
+            "(wjatx/ptc-gal-reference#187). Claude Code's own deferred-tool "
+            "lookup (`ToolSearch`) is not recorded. A hook that fails or is "
+            "removed lets calls through unrecorded (the harness fails open on "
+            "every hook failure). " + _NOT_GATED
         )
     elif observed is None:
         detail = (

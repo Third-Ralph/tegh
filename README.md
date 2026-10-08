@@ -43,6 +43,17 @@ What the Claude Code row covers, and where it stops:
   external write through the gateway is held for you. A hook that fails, or that the agent manages
   to remove, lets calls through unrecorded, and every built-in call now runs one short `tegh hook`
   process. `tegh wrap --no-hooks` leaves the hook out.
+- **An MCP server tegh could not displace is observed, and nothing more.** Servers a plugin
+  provides and claude.ai connectors are not in any configuration tegh can rewrite, so their tools
+  stay callable without the broker. The hook records each such call as `claude-code-mcp other`,
+  which is how the tape names a call that went around the gateway. It does not taint the turn:
+  tegh cannot tell whether the call read anything, and the platform has no tool class for it yet
+  ([wjatx/ptc-gal-reference#187](https://github.com/wjatx/ptc-gal-reference/issues/187)). A read
+  made through one of these servers therefore does not hold the next external write.
+- **What the hook leaves off the tape.** A call the gateway brokered is recorded once, by the
+  broker, and the hook adds nothing for it. Claude Code's own deferred-tool lookup (`ToolSearch`)
+  is not recorded, because it reaches nothing outside the session; that list is one name long and
+  lives in `tegh/hook.py`. Any tool tegh has no row for is recorded as `other`.
 - **Stdio servers, credentialed ones included.** A literal credential in a stdio server's `env` is
   moved out of the Claude Code configuration into tegh's store and delivered when the server is
   spawned. A remote server that takes a credential in an HTTP header is refused

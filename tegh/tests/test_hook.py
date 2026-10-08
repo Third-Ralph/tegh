@@ -31,6 +31,9 @@ from tegh.store import TeghStore
 EVENT_FIXTURE = Path(__file__).with_name("events") / "post_tool_use_read.json"
 TOKEN = "t" * 64
 
+#: A tool the wrapped gateway serves, as Claude Code names it.
+GATEWAY_TOOL = "mcp__tegh__ledger__get_entry"
+
 
 def recorded_event(**changes) -> dict:
     event = json.loads(EVENT_FIXTURE.read_text(encoding="utf-8"))
@@ -162,12 +165,76 @@ def test_the_result_digest_is_over_canonical_json():
         pytest.param(recorded_event(hook_event_name="PreToolUse"), id="PreToolUse"),
         pytest.param(recorded_event(hook_event_name="PostToolUseFailure"), id="failure"),
         pytest.param(recorded_event(hook_event_name="SessionStart"), id="other event"),
-        pytest.param(recorded_event(tool_name="mcp__tegh__ledger__get_entry"), id="mcp tool"),
+        pytest.param(recorded_event(tool_name=GATEWAY_TOOL), id="gateway tool"),
+        pytest.param(
+            recorded_event(tool_name=GATEWAY_TOOL, mcp_server={"name": "tegh", "source": "local"}),
+            id="gateway tool, server named",
+        ),
+        pytest.param(recorded_event(tool_name="ToolSearch"), id="harness-internal tool"),
         pytest.param(recorded_event(tool_name=None), id="no tool name"),
     ],
 )
-def test_events_that_are_not_a_built_in_post_tool_use_are_not_reported(places, event):
+def test_events_that_are_not_reported(places, event):
     assert hook.report_of(event, project=places["project"], home=places["home"]) is None
+
+
+def test_the_gateway_prefix_is_the_name_a_wrap_gives_the_gateway():
+    """The skip rule is a rule about one server name, so it must be the wrap's."""
+    from tegh import interpose
+
+    assert hook.GATEWAY_SERVER_NAME == interpose._UNRECORDED_GATEWAY_NAME
+    assert hook.GATEWAY_SERVER_NAME == interpose.InterposePlan.__dataclass_fields__[
+        "gateway_name"
+    ].default
+    assert hook.GATEWAY_TOOL_PREFIX == "mcp__tegh__"
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        pytest.param(
+            recorded_event(tool_name="mcp__plugin_notes_vault__read_note"), id="plugin server"
+        ),
+        pytest.param(
+            recorded_event(tool_name="mcp__claude_ai_Mail__search_threads"), id="connector"
+        ),
+        pytest.param(recorded_event(tool_name="mcp__teghx__get"), id="a name that only starts alike"),
+        pytest.param(
+            recorded_event(
+                tool_name="mcp__tegh__x__get", mcp_server={"name": "tegh__x", "source": "user"}
+            ),
+            id="another server wearing the gateway's prefix",
+        ),
+    ],
+)
+def test_an_mcp_tool_the_gateway_does_not_serve_is_reported_as_unbrokered(places, event):
+    """Third-Ralph/tegh#26: the `mcp__` prefix is not proof a call was brokered.
+
+    Reported under a harness code of its own, which is what names it on the
+    tape, and as `other`: this adapter cannot say whether the call read, and
+    none of the mouth's read classes would be a true statement about it.
+    """
+    report = hook.report_of(event, project=places["project"], home=places["home"])
+    assert report == {
+        "harness": "claude-code-mcp",
+        "tool_class": "other",
+        "locality": "unknown",
+        "subject_digest": _sha(event["tool_name"]),
+        "result_digest": hook.result_digest(event["tool_response"]),
+    }
+
+
+def test_only_a_listed_internal_tool_goes_unreported(places):
+    """Third-Ralph/tegh#27: silence is a named row, and an unlisted tool is on the tape."""
+    assert hook.HARNESS_INTERNAL_TOOLS == {"ToolSearch"}
+    assert not hook.HARNESS_INTERNAL_TOOLS & set(hook.TOOL_TABLE)
+    unlisted = recorded_event(tool_name="ToolSearchNext")
+    report = hook.report_of(unlisted, project=places["project"], home=places["home"])
+    assert (report["harness"], report["tool_class"], report["locality"]) == (
+        "claude-code",
+        "other",
+        "unknown",
+    )
 
 
 def test_a_report_is_five_leaves_and_nothing_from_the_event(places):
@@ -363,7 +430,8 @@ def test_a_bad_invocation_is_one_line_and_exit_0(wired, capsys, argv, stdin):
     "event",
     [
         recorded_event(hook_event_name="PreToolUse"),
-        recorded_event(tool_name="mcp__tegh__ledger__get_entry"),
+        recorded_event(tool_name=GATEWAY_TOOL),
+        recorded_event(tool_name="ToolSearch"),
     ],
 )
 def test_an_ignored_event_posts_nothing_and_says_nothing(wired, capsys, event):

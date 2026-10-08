@@ -172,6 +172,67 @@ def test_a_reported_built_in_read_holds_the_next_external_write(wrapped, capfd, 
     assert seen["resultDigest"] == expected["result_digest"]
 
 
+def _gateway_tool_name(harness: dict) -> str:
+    """The wrapped write tool as Claude Code names it, from the config the wrap wrote.
+
+    The server name is read off disk and not assumed, so a wrap that named its
+    entry anything else would send this event past the hook's skip rule.
+    """
+    document = json.loads(harness["claude_json"].read_text(encoding="utf-8"))
+    (server,) = document["projects"][str(harness["project"])]["mcpServers"]
+    return f"mcp__{server}__{WRITE_TOOL}"
+
+
+def test_mcp_calls_on_the_tape_one_record_each_and_the_unbrokered_one_named(wrapped, capfd):
+    """Third-Ralph/tegh#26 and #27, on a real tape.
+
+    A brokered call is recorded once, by the broker: the hook event Claude Code
+    sends for the same call adds nothing. A harness-internal lookup adds
+    nothing. A call to an MCP server the gateway does not serve lands as a
+    record that names it (`claude-code-mcp`), and does NOT taint the turn, so
+    the write after it still executes. That last half is the gap the platform
+    class asked for upstream would close; when it lands, the final write is
+    held and this test changes with it.
+    """
+    project, home = wrapped["project"], wrapped["home"]
+    store = store_of(wrapped)
+    command = gateway_argv(project, launcher=tegh_launcher(), home=store.home)
+    hook_command = _installed_hook_command(project)
+    unbrokered = "mcp__plugin_notes_vault__read_note"
+
+    def replay(tool_name: str) -> None:
+        ran = _run_hook(hook_command, recorded_event(cwd=str(project), tool_name=tool_name), home)
+        assert (ran.returncode, ran.stdout, ran.stderr) == (0, "", "")
+
+    client = GatewayClient(command, env=harness_spawn_env(), timeout=120)
+    try:
+        client.initialize(client_name="tegh-hook-e2e")
+        _wait_for_address(store.event_mouth_addr_path(project), client)
+        first = client.call_tool(WRITE_TOOL, WRITE_ARGS)
+        replay(_gateway_tool_name(wrapped))
+        replay("ToolSearch")
+        replay(unbrokered)
+        second = client.call_tool(WRITE_TOOL, WRITE_ARGS)
+    finally:
+        client.close()
+
+    assert first["isError"] is False, result_text(first)
+    assert second["isError"] is False, result_text(second)
+    tape = _tape(capfd, project)
+    brokered = ("ledger", "get_entry", "allow", "executed")
+    assert [(r["tool"], r["op"], r["decision"], r["outcome"]) for r in tape] == [
+        brokered,
+        ("harness-tool", "other", "abstain", "observed"),
+        brokered,
+    ]
+    seen = tape[1]
+    assert seen["reason"] == (
+        "observed, not decided: claude-code-mcp other (unknown) reported by mouth tool-event"
+    )
+    assert unbrokered not in json.dumps(seen)
+    assert "CHAIN CONSISTENT" in _verified(capfd, project)
+
+
 def test_a_wrap_with_no_hooks_installs_none(harness, capsys):
     assert main(["init"]) == 0
     status = wrap_command(
