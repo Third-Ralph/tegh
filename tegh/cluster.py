@@ -70,18 +70,23 @@ SA_DIR = "var/run/secrets/kubernetes.io/serviceaccount"
 
 #: The mounts that carry authority in this arm, and what each one would hand a
 #: pod that had it. Verified against the manifests rather than assumed:
-#: `50-deployment-broker.yaml:105-108` mounts the first four into the broker, and
-#: `41-job-ratify.yaml:72` mounts the issuer key into the ratify leg.
+#: `50-deployment-broker.yaml` mounts the store, the grant key space, the audit
+#: tape and the connector credentials into the broker, and no issuer key.
+#: `41-job-ratify.yaml` and `39-job-bootstrap.yaml` mount all of those plus the
+#: issuer key, twice: the Secret as projected, and the in-memory volume the leg
+#: copies it into before signing.
 #:
-#: Their ABSENCE is the claim. `52-job-agent.yaml` declares no volume at all, so
-#: these paths do not exist in an agent pod — a kernel-level fact, not a
-#: permission the pod is politely declining to use.
+#: Their ABSENCE is the claim. `52-job-agent.yaml` mounts none of them (its one
+#: volume is the drill-script ConfigMap), so these paths do not exist in an agent
+#: pod — a kernel-level fact, not a permission the pod is politely declining to
+#: use.
 SENSITIVE_MOUNTS = {
     "/run/connector-secrets": "connector credentials",
     "/run/issuer-projected": "the issuer signing key",
-    "/var/lib/tegh": "the tegh store",
-    "/var/lib/tegh-grants": "the grant key space",
-    "/var/lib/tegh-audit": "the audit tape",
+    "/run/issuer-private": "the issuer signing key, as copied for signing",
+    "/var/lib/broker": "the store",
+    "/var/lib/broker-grants": "the grant key space",
+    "/var/lib/broker-audit": "the audit tape",
 }
 
 #: All-zero effective capabilities, as `restricted-v2` leaves them. Compared as a
@@ -239,8 +244,9 @@ def _mount_line(facts: PodFacts) -> PostureLine:
             source="the pod's own filesystem; "
             "safe_agents/arms/openshift/50-deployment-broker.yaml",
             detail="reported as a property that does not hold because it is stated "
-            "from the agent's side of the boundary: a pod holding these is the "
-            "broker, and compromising it reaches everything they carry. The "
+            "from the agent's side of the boundary: a pod holding any of these is "
+            "the broker or a ceremony leg, and compromising it reaches everything "
+            "they carry. The "
             "boundary protects the credentials FROM the agent, and does nothing "
             "for a compromised broker",
         )
@@ -321,7 +327,8 @@ def posture_note(facts: PodFacts | None, *, interposed: bool) -> PostureLine:
             "safe_agents/arms/openshift/cluster-agent.sh",
             detail="the disagreement is deliberate, and is the honest way round. "
             "Posture 2 is 'the agent inside a sandbox, the gateway outside it, egress "
-            "to the gateway only', and this topology is that. But posture makes no "
+            "to the gateway and the model provider and nothing else', and this "
+            "topology is that. But posture makes no "
             "network calls, so it did not ATTEMPT either of the refusals that make "
             "the containment real — and a posture is a claim about where a boundary "
             "is, which is not something to assert off a manifest. The drill "
@@ -333,7 +340,7 @@ def posture_note(facts: PodFacts | None, *, interposed: bool) -> PostureLine:
         "not: this workload is a contained principal, and no call is routed "
         "through tegh",
         holds="no",
-        source="docs/posture-ladder.md; the harness config's mcpServers block",
+        source="docs/posture-ladder.md; the harness config's mcpServers blocks",
         detail="a boundary around something that gates nothing. This is the "
         "expected state for a synthetic client driving the broker's HTTP surface "
         "directly, which is what this arm's drill runs — it exercises the "
@@ -347,8 +354,10 @@ def cluster_lines(facts: PodFacts | None) -> list[PostureLine]:
     """The CLUSTER section, empty off-cluster.
 
     Empty rather than a row of "not applicable" lines: a laptop report should not
-    grow six cluster claims that all say nothing, and `posture_note` already carries
-    the one statement an off-cluster reader needs.
+    grow six cluster claims that all say nothing. Nothing else speaks for the
+    cluster there either: off-cluster `posture.build_report` emits no cluster
+    section at all and never calls `posture_note`, so that function's
+    "not running in a pod" branch is reachable only by calling it directly.
     """
     if facts is None:
         return []

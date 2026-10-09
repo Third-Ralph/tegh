@@ -7,8 +7,8 @@ than EC2 have thin automated coverage, so the cluster legs have to be scripted
 rather than manual.
 
 What a fixture tree cannot prove is that the paths are the RIGHT ones. That is
-settled against the manifests (`50-deployment-broker.yaml:105-108`,
-`41-job-ratify.yaml:72`) and re-settled by the drill, which fails loudly in-pod
+settled against the manifests (`50-deployment-broker.yaml`,
+`41-job-ratify.yaml`) and re-settled by the drill, which fails loudly in-pod
 if any of them exists where it should not.
 """
 
@@ -97,12 +97,34 @@ def test_the_agent_pod_is_seen_as_a_distinct_principal_holding_nothing(pod):
 def test_a_broker_shaped_pod_is_seen_to_carry_authority(pod):
     """The same code, run where the credentials ARE, must say so — a module that
     only ever reported 'nothing is mounted' would be a constant."""
-    facts = observe(root=pod(mounts=("/run/connector-secrets", "/var/lib/tegh")))
+    facts = observe(root=pod(mounts=("/run/connector-secrets", "/var/lib/broker")))
 
-    assert set(facts.present_mounts) == {"/run/connector-secrets", "/var/lib/tegh"}
+    assert set(facts.present_mounts) == {"/run/connector-secrets", "/var/lib/broker"}
     (line,) = [x for x in cluster_lines(facts) if "CARRIES authority" in x.claim]
     assert line.holds == "no"
     assert "does nothing for a compromised broker" in line.detail
+
+
+@pytest.mark.parametrize(
+    "mounts",
+    [
+        ("/var/lib/broker", "/var/lib/broker-audit"),
+        ("/var/lib/broker",),
+        ("/var/lib/broker-grants",),
+        ("/var/lib/broker-audit",),
+        ("/run/issuer-projected",),
+        ("/run/issuer-private",),
+        ("/run/connector-secrets",),
+    ],
+    ids=lambda mounts: "+".join(mounts),
+)
+def test_a_pod_holding_any_authority_mount_is_never_reported_as_holding_none(pod, mounts):
+    lines = cluster_lines(observe(root=pod(mounts=mounts)))
+
+    (line,) = [x for x in lines if "mounted into this pod" in x.claim or "CARRIES" in x.claim]
+    assert line.holds == "no", f"{mounts} mounted, yet the report says: {line.claim}"
+    for mount in mounts:
+        assert f"{mount} (" in line.claim, f"{mount} is mounted and the report does not name it"
 
 
 def test_an_unreadable_token_leaves_the_identity_unknown_not_assumed(pod):
