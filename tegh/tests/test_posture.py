@@ -6,7 +6,7 @@ vocabulary was ruled in advance, which is exactly the setup where a confident
 ladder gets written from the vocabulary rather than from the code — so the rule
 is a constructor invariant with a sweep behind it, not a review habit.
 
-The rest tests that posture reports the PRESENT tense: the four live gaps are
+The rest tests that posture reports the PRESENT tense: the live gaps are
 named unconditionally, an unreadable thing is `unknown` rather than rounded to
 clean, and no line claims a runtime protection that does not exist yet.
 """
@@ -25,6 +25,7 @@ from tegh.lock import Harness
 from tegh.posture import (
     PostureLine,
     _is_interposed,
+    _routing,
     build_report,
     render,
     to_dict,
@@ -49,6 +50,9 @@ def _no_lock(project, store):
 
 
 def _report(project, store, **kwargs):
+    # A harness home of the test's own, so the report never reads the config of
+    # whoever runs the suite. An absent one reads as no servers at any scope.
+    kwargs.setdefault("harness_home", project.parent / "harness-home")
     return build_report(
         project, store, Harness.CLAUDE_CODE, lock_reader=_no_lock, **kwargs
     )
@@ -125,45 +129,140 @@ def _gateway(project: Path) -> dict:
     return claude_code.gateway_entry(project, launcher=["/venv/bin/tegh"], home="/h/.tegh")
 
 
+def _other(project: Path) -> dict:
+    return {"notes": {"command": "notes"}}
+
+
+def _none(project: Path) -> dict:
+    return {}
+
+
+def _wrapped(project: Path) -> dict:
+    return {"tegh": _gateway(project)}
+
+
+def _write_config(tmp_path, project, *, local, at_project=_none, at_user=_none) -> Path:
+    """The three blocks Claude Code loads for a project, in a harness home."""
+    home = tmp_path / "harness-home"
+    home.mkdir(exist_ok=True)
+    document: dict = {"projects": {str(project): {"mcpServers": local(project)}}}
+    if at_user(project):
+        document["mcpServers"] = at_user(project)
+    # In the harness's own style, which tegh proves before it reads a block.
+    (home / ".claude.json").write_text(
+        json.dumps(document, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+    if at_project(project):
+        (project / ".mcp.json").write_text(
+            json.dumps({"mcpServers": at_project(project)}, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    return home
+
+
 @pytest.mark.parametrize(
-    ("servers", "interposed"),
+    ("blocks", "state"),
     [
-        pytest.param(lambda project: {"tegh": _gateway(project)}, True, id="as-a-wrap-writes-it"),
+        pytest.param({"local": _wrapped}, "interposed", id="as-a-wrap-writes-it"),
         # Read from what the entry runs, as wrap and unwrap read it.
-        pytest.param(lambda project: {"broker": _gateway(project)}, True, id="renamed"),
         pytest.param(
-            lambda project: {"tegh": {"command": "npx", "args": ["-y", "a-server"]}},
-            False,
+            {"local": lambda project: {"broker": _gateway(project)}},
+            "interposed",
+            id="renamed",
+        ),
+        pytest.param(
+            {"local": lambda project: {"tegh": {"command": "npx", "args": ["-y", "a-server"]}}},
+            "no-gateway",
             id="a-server-only-called-tegh",
         ),
         pytest.param(
-            lambda project: {"tegh": _gateway(project.parent / "other")},
-            False,
+            {"local": lambda project: {"tegh": _gateway(project.parent / "other")}},
+            "no-gateway",
             id="another-projects-gateway",
         ),
         pytest.param(
-            lambda project: {"tegh": _gateway(project), "notes": {"command": "notes"}},
-            False,
+            {"local": lambda project: {**_wrapped(project), **_other(project)}},
+            "beside-others",
             id="the-gateway-and-a-server-beside-it",
         ),
-        pytest.param(lambda project: {}, False, id="no-servers"),
+        # The harness loads all three scopes side by side, so a server at
+        # either of the other two is a server beside the gateway.
+        pytest.param(
+            {"local": _wrapped, "at_project": _other},
+            "beside-others",
+            id="a-server-at-project-scope",
+        ),
+        pytest.param(
+            {"local": _wrapped, "at_user": _other},
+            "beside-others",
+            id="a-server-at-user-scope",
+        ),
+        pytest.param(
+            {"local": _none, "at_user": _wrapped},
+            "unestablished",
+            id="the-gateway-at-user-scope-only",
+        ),
+        pytest.param({"local": _none}, "no-gateway", id="no-servers"),
+        pytest.param(
+            {"local": _none, "at_user": _other}, "no-gateway", id="only-a-user-scope-server"
+        ),
     ],
 )
-def test_interposed_means_the_one_server_runs_this_projects_gateway(
-    tmp_path, project, servers, interposed: bool
+def test_interposed_means_the_gateway_is_the_only_server_at_all_three_scopes(
+    tmp_path, project, store, blocks, state: str
 ):
-    home = tmp_path / "harness-home"
-    home.mkdir()
-    (home / ".claude.json").write_text(
-        # In the harness's own style, which tegh proves before it reads a block.
-        json.dumps(
-            {"projects": {str(project): {"mcpServers": servers(project)}}},
-            indent=2, ensure_ascii=False,
-        ),
-        encoding="utf-8",
-    )
+    home = _write_config(tmp_path, project, **blocks)
 
-    assert _is_interposed(project, Harness.CLAUDE_CODE, home) is interposed
+    routing = _routing(project, Harness.CLAUDE_CODE, home)
+    assert routing.state == state
+    assert _is_interposed(project, Harness.CLAUDE_CODE, home) is (state == "interposed")
+    assert bool(routing.beside) is (state == "beside-others")
+
+    report = _report(project, store, harness_home=home)
+    assert report.posture == ("1" if state == "interposed" else "pre-1")
+    assert report.gaps[0].holds == ("yes" if state == "interposed" else "no")
+    for named in routing.beside:
+        assert named in report.gaps[0].detail
+
+
+@pytest.mark.parametrize(
+    "unreadable",
+    [
+        pytest.param(lambda home, project: home / ".claude.json", id="the-harness-home-config"),
+        pytest.param(lambda home, project: project / ".mcp.json", id="the-project-config"),
+    ],
+)
+def test_a_config_that_cannot_be_read_is_never_interposed(tmp_path, project, store, unreadable):
+    """A wrapped local block proves nothing while another block is unreadable:
+    the harness may load a server from it that tegh did not see."""
+    home = _write_config(tmp_path, project, local=_wrapped)
+    assert _is_interposed(project, Harness.CLAUDE_CODE, home) is True
+
+    unreadable(home, project).write_text("{ not json", encoding="utf-8")
+
+    assert _routing(project, Harness.CLAUDE_CODE, home).state == "unestablished"
+    report = _report(project, store, harness_home=home)
+    assert report.posture == "pre-1"
+    assert report.gaps[0].holds == "no"
+    # It says it does not know, and names no cause it did not establish.
+    assert "could not be established" in report.gaps[0].claim
+    assert "not been wrapped" not in render(report)
+
+
+def test_a_wrapped_report_claims_only_the_calls_the_gateway_serves(tmp_path, project, store):
+    """The three blocks are the ones tegh can write. A plugin's server or a
+    claude.ai connector is loaded from elsewhere, so "its only MCP server" and
+    "MCP calls are gated" would both be more than the read established."""
+    home = _write_config(tmp_path, project, local=_wrapped)
+    report = _report(project, store, harness_home=home)
+
+    assert report.posture == "1"
+    assert "the tools the gateway serves" in report.rung_reason.claim
+    assert "for no other call" in report.rung_reason.detail
+    line = report.gaps[0]
+    assert "only MCP server in the three config blocks tegh can write" in line.claim
+    for source in ("Plugin-provided", "claude.ai connectors", "managed-mcp.json"):
+        assert source in line.detail
 
 
 @pytest.mark.parametrize(
@@ -178,7 +277,7 @@ def test_interposed_means_the_one_server_runs_this_projects_gateway(
 )
 def test_the_live_gaps_are_named_unconditionally(project, store, phrase):
     """Naming a gap you are not closing is the honest move; implying it is
-    handled is the dishonest one. These four are live TODAY."""
+    handled is the dishonest one. These are live TODAY for an unwrapped project."""
     text = render(_report(project, store)).lower()
 
     assert phrase.lower() in text
@@ -259,7 +358,7 @@ def test_no_gap_is_described_as_pending_or_planned(project, store):
 
 
 def test_same_user_exposure_is_stated_as_a_property_that_does_not_hold(project, store):
-    """store.py:25 says `tegh posture` MUST say this. It is the single claim
+    """store.py:38-44 says `tegh posture` MUST say this. It is the single claim
     most likely to be quietly dropped, because it undercuts the feature.
 
     Asserted on the line's VERDICT, not on the words: a first cut of this test

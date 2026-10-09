@@ -1,7 +1,7 @@
 """`tegh posture` — what actually holds in THIS configuration, and what does not.
 
 Three modules already deferred to this one by name before it existed
-(`store.py:25`, `signing.py:47-49`, `cli.py:132`), each having correctly declined
+(`store.py:38-44`, `signing.py:47-49`, `cli.py:231`), each having correctly declined
 to make a security claim on the grounds that posture would make it. That debt is
 what this module pays.
 
@@ -26,19 +26,26 @@ what the roadmap says it will do. A gap named plainly is the honest move and the
 cheapest possible argument for funding its fix; a gap described as "pending"
 reads to a user as "handled".
 
-Four gaps are named unconditionally because all four are live: a gateway now
-exists but nothing points at it, so nothing is interposed at runtime; the
-harness's built-in tools are ungated (tegh's `PostToolUse` hook observes them
-after they run, and stops none); a REMOTE server
-authenticating by HTTP header cannot be wrapped (`header_map` exists in
-the base and tegh does not emit it — the stdio half relocates); and
-MCP-stdio children spawn unconfined (wjatx/ptc-gal-reference#104).
+`_invariant_gaps` returns five lines. The first is interposition, and it is the
+one line there that is read per project: `_routing` reads the three `mcpServers`
+blocks tegh can write for the project and the line reports one of four states
+(the gateway is the only server in them, the gateway sits beside other servers,
+no entry runs the gateway, or tegh could not establish which). The second is the
+harness's built-in tools, which are ungated in every state; whether tegh's
+`PostToolUse` hook observes them after they run is also read per project. The
+other three are static: a REMOTE server authenticating by HTTP header cannot be
+wrapped (`header_map` exists in the base and tegh does not emit it, while the
+stdio half relocates); MCP-stdio children spawn unconfined
+(wjatx/ptc-gal-reference#104); and the registry audit verifies admission-record
+signatures only when the calling environment names a verify-keys file.
 
-That first gap is the one to watch. It was rewritten when the gateway landed and
-its verdict did NOT change, which is the correct outcome and an easy one to get
-wrong in the flattering direction: building the component that would enforce is
-not the same as enforcing, and a posture report that celebrated the build would
-have told a user they were protected by something nothing routes through.
+The interposition line is the one to watch. When the gateway was first built and
+no command could yet point a harness at it, that line was rewritten and its
+verdict stayed `no`. That was the correct outcome and an easy one to get wrong in
+the flattering direction: building the component that would enforce was not the
+same as enforcing, and a report that celebrated the build would have told a user
+they were protected by something no call was routed through. The verdict moved
+only once `tegh wrap` could interpose the gateway, and it moves per project.
 
 ## What posture deliberately does not do
 
@@ -212,8 +219,8 @@ def _polarity_lines(project: Path, store: TeghStore) -> list[PostureLine]:
             "changes no decision today",
             holds="no",
             source="safe_agents/broker/pdp/facts.py (no polarity field); "
-            "safe_agents/broker/pdp/engine.py:88-99 (_approval_or_deny); "
-            "safe_agents/broker/prototype/broker_server.py:416 "
+            "safe_agents/broker/pdp/engine.py::_approval_or_deny; "
+            "safe_agents/broker/prototype/broker_server.py::_make_pip "
             "(human_reachable hardcoded True)",
             detail="the declared value is validated and stored and nothing reads it: "
             "the PDP's Facts carry no polarity, and the seam that would dispatch on "
@@ -293,7 +300,7 @@ def _invariant_holds() -> list[PostureLine]:
         PostureLine(
             claim="A same-user attacker can read and write tegh's authority anyway",
             holds="no",
-            source="tegh/store.py:20-26",
+            source="tegh/store.py:38-44",
             detail="same-user process separation is not privilege separation; this "
             "defeats an ordinary injected-agent edit, not a determined adversary "
             "already running as this user. Posture 2 is what makes it a boundary",
@@ -309,7 +316,7 @@ def _invariant_holds() -> list[PostureLine]:
         PostureLine(
             claim="Admission decisions are recorded in a signed, append-only ledger",
             holds="yes",
-            source="broker/MCP-HOST.md; tegh/store.py:34-36",
+            source="broker/MCP-HOST.md; tegh/store.py:46-54",
             detail="ledger records are DSSE-signed by this tegh home's local issuer key",
         ),
         PostureLine(
@@ -327,47 +334,127 @@ def _invariant_holds() -> list[PostureLine]:
     ]
 
 
-def _interposition_line(wrapped: bool) -> PostureLine:
+#: What `_routing` found in the `mcpServers` blocks tegh can write for a project.
+#: Three of the four are "not interposed", kept apart because they are different
+#: facts with different remedies, and reporting one as another would assert a
+#: cause the read did not establish.
+Interposition = Literal["interposed", "beside-others", "no-gateway", "unestablished"]
+
+
+@dataclass(frozen=True)
+class Routing:
+    """One reading of a project's writable `mcpServers` blocks.
+
+    `beside` names every entry that is not this project's gateway, as
+    `name (scope)`, and is filled only for `beside-others`.
+    """
+
+    state: Interposition
+    beside: tuple[str, ...] = ()
+
+    @property
+    def interposed(self) -> bool:
+        return self.state == "interposed"
+
+
+#: The sources of MCP servers a wrap does not reach, said the same way wherever
+#: a line claims the gateway is alone.
+_UNWRITABLE_SOURCES = (
+    "Those three blocks are the ones tegh can write. Plugin-provided servers and "
+    "claude.ai connectors are loaded from elsewhere and tegh cannot rewrite "
+    "them, so a call to one of those goes around the broker (the next line says "
+    "whether it is recorded); a managed-mcp.json, where one exists, takes exclusive "
+    "control and the gateway is then not loaded at all"
+)
+
+_CONFIG_SOURCE = (
+    "the harness config's own mcpServers blocks (local, project and user scope), "
+    "read at report time"
+)
+
+
+def _interposition_line(routing: "Routing | bool") -> PostureLine:
     """Whether calls are actually routed through tegh, for THIS project.
 
     Read from the harness config rather than asserted, because this is the line
     the whole report hangs on: while it is false every other line describes
-    evidence quality rather than enforcement. It was the largest gap from the
-    day this file was written until `tegh wrap` could interpose the gateway, and it is the one line here whose
-    answer changes per project — a wrapped project and an unwrapped one on the
-    same machine genuinely sit on different postures.
+    evidence quality rather than enforcement. It is the one line here whose
+    answer changes per project, so a wrapped project and an unwrapped one on
+    the same machine sit on different postures.
+
+    A bare bool is accepted for the two states a caller can name without a
+    read: True is `interposed`, False is `no-gateway`.
     """
-    if wrapped:
+    if isinstance(routing, bool):
+        routing = Routing("interposed" if routing else "no-gateway")
+
+    if routing.state == "interposed":
         return PostureLine(
-            claim="Calls are routed through tegh: this project's harness config "
-            "names the gateway as its only MCP server",
+            claim="Calls to the gateway's tools are routed through tegh: the gateway "
+            "is the only MCP server in the three config blocks tegh can write for "
+            "this project (local, project, user)",
             holds="yes",
-            source="tegh/interpose.py; the harness config's own "
-            "mcpServers block, read at report time",
-            detail="the broker's MCP mouth is interposed, so an "
-            "unadmitted tool is refused by the broker and recorded. NB this gates "
-            "MCP tools only — the agent's built-in shell, file and web tools do not "
-            "go through the gateway and nothing decides them; at most they are "
-            "observed after they ran, which is the next line",
+            source="tegh/interpose.py; "
+            f"tegh/harnesses/claude_code.py::unwritable_sources; {_CONFIG_SOURCE}",
+            detail="the broker's MCP mouth is interposed, so an unadmitted tool is "
+            f"refused by the broker and recorded. {_UNWRITABLE_SOURCES}. This gates "
+            "the gateway's MCP tools only: the agent's built-in shell, file and "
+            "web tools do not go through the gateway and nothing decides them; at "
+            "most they are observed after they ran, which is the next line",
+        )
+    if routing.state == "beside-others":
+        count = len(routing.beside)
+        return PostureLine(
+            claim="MCP calls can go around tegh: this project's harness config runs "
+            f"the gateway, and also holds {count} other MCP server "
+            f"{'entry' if count == 1 else 'entries'} that the harness loads beside it",
+            holds="no",
+            source=f"tegh/harnesses/claude_code.py::config_sites; {_CONFIG_SOURCE}",
+            detail=f"beside the gateway: {', '.join(routing.beside)}. The harness "
+            "loads servers from all three scopes side by side, so a call to a tool "
+            "the gateway serves is decided by the broker and a call to one of these "
+            "is decided by nothing. A wrap leaves the gateway as the only entry in "
+            "the three blocks; the read does not say how these came to be there. "
+            "Unwrap and wrap again to bring them behind the gateway, or remove them",
+        )
+    if routing.state == "unestablished":
+        return PostureLine(
+            claim="Whether calls are routed through tegh could not be established "
+            "from this project's harness config, so the report treats them as not "
+            "routed",
+            holds="no",
+            source=f"tegh/posture.py::_routing; {_CONFIG_SOURCE}",
+            detail="one of these holds and this report does not say which: a config "
+            "file could not be read or parsed, tegh does not know where this harness "
+            "keeps its MCP servers, or an entry runs this project's gateway but not "
+            "as the single local-scope entry a wrap writes. An unreadable config is "
+            "never taken as evidence that enforcement is in place",
         )
     return PostureLine(
         claim="Nothing is enforced at runtime: a gateway exists, but this "
         "project's harness config does not point at it, so no call is "
         "currently routed through tegh",
         holds="no",
-        source="safe_agents/broker/gateway/surface.py; the harness config's own "
-        "mcpServers block, read at report time",
+        source=f"safe_agents/broker/gateway/surface.py; {_CONFIG_SOURCE}",
         detail="the broker presents as an MCP server and tegh can interpose "
-        "it, so both halves exist — this project has simply not been "
-        "wrapped, or has been unwrapped. Run `tegh wrap` to route calls through "
+        "it, so both halves exist. All three blocks were read and no entry in "
+        "them runs this project's gateway; the read does not say whether the "
+        "project was never wrapped, was unwrapped, or had the entry removed "
+        "some other way. Run `tegh wrap` to route calls through "
         "it. Until then the lock records what was admitted and nothing gates a "
         "call, which makes every other line below a statement about evidence "
         "quality rather than about enforcement",
     )
 
 
-def _is_interposed(project: Path, harness: Harness, home: Path | None = None) -> bool:
-    """True when this project's harness config names tegh's gateway and nothing else.
+def _routing(project: Path, harness: Harness, home: Path | None = None) -> Routing:
+    """Read the `mcpServers` blocks the harness loads for this project.
+
+    Claude Code loads the local, project and user blocks side by side, so the
+    gateway being alone in the local block says nothing while either of the
+    other two holds a server. `interposed` therefore needs all three: the local
+    block is exactly one entry that runs this project's gateway, and the
+    project and user blocks hold no entry at all.
 
     The gateway is the entry that RUNS this project's gateway, under any name:
     the reading `tegh wrap` and `tegh unwrap` use. A lone server of the user's
@@ -375,23 +462,55 @@ def _is_interposed(project: Path, harness: Harness, home: Path | None = None) ->
 
     Deliberately reads the CONFIG, not tegh's own backup file: the question is
     what the harness would load, and a stale backup would answer a different
-    question. Any failure to read answers `False` — an unreadable config cannot
-    be evidence that enforcement is in place, and this is the direction that
-    must fail safe.
+    question. Any failure to read any block answers `unestablished`, never
+    `interposed`: an unreadable config cannot be evidence that enforcement is in
+    place, and this is the direction that must fail safe.
+
+    The three sites come from the Claude Code adapter directly, imported here
+    the way `tegh.harnesses` dispatches on harness, because that package offers
+    an accessor for the gateway's site alone.
     """
     try:
-        from tegh.harnesses import gateway_config_site  # noqa: PLC0415
         from tegh.interpose import _load_site, _runs_gateway  # noqa: PLC0415
 
-        gateway_site = gateway_config_site(harness, project, home=home)
-        if gateway_site is None:
-            return False
-        _, block, _ = _load_site(gateway_site)
+        if harness != Harness.CLAUDE_CODE:
+            return Routing("unestablished")
+        from tegh.harnesses.claude_code import config_sites  # noqa: PLC0415
+
+        sites, gateway_site = config_sites(project, home=home)
+        blocks = [(site, _load_site(site)[1]) for site in sites]
     except Exception:  # noqa: BLE001 — any failure means "not proven interposed"
-        return False
-    return len(block) == 1 and all(
-        _runs_gateway(entry, str(project)) for entry in block.values()
-    )
+        return Routing("unestablished")
+
+    local_gateways = 0
+    gateways_elsewhere = 0
+    others: list[str] = []
+    for site, block in blocks:
+        for name, entry in block.items():
+            if not _runs_gateway(entry, str(project)):
+                others.append(f"{name} ({site.scope.value} scope)")
+            elif site is gateway_site:
+                local_gateways += 1
+            else:
+                gateways_elsewhere += 1
+
+    if others:
+        if local_gateways or gateways_elsewhere:
+            return Routing("beside-others", tuple(others))
+        return Routing("no-gateway")
+    if local_gateways == 1 and not gateways_elsewhere:
+        return Routing("interposed")
+    if local_gateways or gateways_elsewhere:
+        return Routing("unestablished")
+    return Routing("no-gateway")
+
+
+def _is_interposed(project: Path, harness: Harness, home: Path | None = None) -> bool:
+    """True when the gateway is the only server in the blocks tegh can write.
+
+    See `_routing`, which this is one reading of.
+    """
+    return _routing(project, harness, home).interposed
 
 
 #: The tests the built-ins line rests on: tegh reaches for no pre-call hook
@@ -491,11 +610,11 @@ def _hook_observes(project: Path, harness: Harness) -> Optional[bool]:
 
 
 def _invariant_gaps(
-    wrapped: bool = False, observed: Optional[bool] = False
+    routing: "Routing | bool" = False, observed: Optional[bool] = False
 ) -> list[PostureLine]:
     """The gaps that are live today, stated in the present tense."""
     return [
-        _interposition_line(wrapped),
+        _interposition_line(routing),
         _built_ins_line(observed),
         PostureLine(
             claim="A REMOTE server that authenticates by HTTP header cannot be wrapped",
@@ -520,7 +639,8 @@ def _invariant_gaps(
         # registry was unaudited outright. It is audited now, on the local store,
         # by the same command the STORE INTEGRITY section runs. What is still
         # missing is on tegh's side: `ceremony_env` names no verify keys, so the
-        # signature rules are skipped. `test_posture.py` pins that pairing, so
+        # signature rules run only when the calling shell names a file, which
+        # `_audit_lines` forwards. `test_posture.py` pins that pairing, so
         # this line goes red the day tegh starts naming a verify-keys file.
         PostureLine(
             claim="The registry rows tegh's trust rests on are audited, but the "
@@ -530,10 +650,13 @@ def _invariant_gaps(
             detail="the store audit reported below covers the MCP registry "
             "(TOOLDEF#/TOOLREC#/TOOLPROP#) in this tegh home: row HMACs, row-to-record "
             "consistency, orphans and proposals. PARTIAL because tegh names no issuer "
-            "verify keys for that audit, so the rules that verify an admission "
-            "record's signature are skipped and the record bytes the other rules "
-            "compare are not authenticated. The base reads verify keys from a file "
-            f"({_ISSUER_VERIFY_KEYS_FILE_ENV}); tegh does not write or name one",
+            "verify keys for that audit. The rules that verify an admission "
+            "record's signature run only if the environment `tegh posture` is "
+            f"called from names a verify-keys file ({_ISSUER_VERIFY_KEYS_FILE_ENV}), "
+            "and then they rest on a file that environment chose. Otherwise they "
+            "are skipped, and the record bytes the other rules compare are not "
+            "authenticated. STORE INTEGRITY below lists the rules that did not "
+            "run in this report. tegh does not write or name a verify-keys file",
         ),
     ]
 
@@ -614,8 +737,11 @@ def _project_lines(
         signature = PostureLine(
             claim="This project's lock is UNSIGNED",
             holds="no",
-            source=f"{signature_path} does not exist",
-            detail="TL3 — written with --allow-unsigned, so it carries no evidence of origin",
+            source=f"{signature_path} does not exist; docs/tegh-lock.md",
+            detail="the signature file is absent, so this lock carries no evidence "
+            "of origin. The absence is all this report read. A lock written with "
+            "--allow-unsigned, one written before this tegh home had keys, and one "
+            "whose signature file was deleted all look like this (TL3)",
         )
 
     pinned = sum(len(server.admitted) for server in loaded.lock.servers)
@@ -627,7 +753,8 @@ def _project_lines(
             source=str(lock_path),
             detail="each entry pins the full ratified definition rather than a hash, so "
             "`tegh diff` can render WHAT changed rather than only that something did "
-            "(TL4). It does NOT mean any of them is gated — see the runtime gap above",
+            "(TL4). Admitted is not gated: whether a call to any of them goes "
+            "through the broker is the first line under WHAT DOES NOT",
         ),
         PostureLine(
             claim="Whether those pins still match what the servers advertise is UNKNOWN here",
@@ -844,6 +971,70 @@ def _run_audit(env: dict, db_path: str) -> subprocess.CompletedProcess:
 # ---------------------------------------------------------------------------
 
 
+#: What posture 1 means, said once for every branch of `_rung_reason`.
+_POSTURE_1_MEANS = (
+    "posture 1 means deterministic gating plus taint plus audit honesty on one machine"
+)
+_RUNG_SOURCE = "docs/posture-ladder.md; the harness config's mcpServers blocks"
+
+
+def _rung_reason(routing: Routing) -> PostureLine:
+    """Why this configuration sits on the posture it does, per `Routing` state.
+
+    Four texts, because the three states below posture 1 are different facts:
+    with no gateway entry no call is gated, with the gateway beside other
+    servers some calls are, and with an unreadable config neither is known.
+    """
+    if routing.state == "interposed":
+        return PostureLine(
+            claim="This configuration is at posture 1 — calls to the tools the "
+            "gateway serves are gated on this one machine, by tegh, as the same OS "
+            "user as the agent",
+            holds="partial",
+            source=_RUNG_SOURCE,
+            detail=f"{_POSTURE_1_MEANS}, and that is what this is for calls to the "
+            "tools the gateway serves, and for no other call. An MCP server the "
+            "harness loads from a source tegh cannot write (a plugin, a claude.ai "
+            "connector) is not behind the gateway. It is not "
+            "posture 2: tegh runs as the same OS user as the agent it serves, so a "
+            "determined same-user adversary reads and writes tegh's home too. "
+            "The agent's built-in shell, file and web tools are gated by nothing: "
+            "with tegh's hook installed they are observed after they run, and a "
+            "read outside the project taints the turn",
+        )
+    if routing.state == "beside-others":
+        return PostureLine(
+            claim="This configuration is BELOW posture 1 — the gateway is one MCP "
+            "server among several, so only some MCP calls are gated",
+            holds="partial",
+            source=_RUNG_SOURCE,
+            detail=f"{_POSTURE_1_MEANS}. Admission, the signed ledger, the signed "
+            "lock and a gateway are all in place, and this project's config runs "
+            "the gateway; it also holds other MCP servers the harness loads beside "
+            "it, and a call to one of those is gated by nothing",
+        )
+    if routing.state == "unestablished":
+        return PostureLine(
+            claim="This configuration is reported BELOW posture 1 — tegh could not "
+            "establish that calls are routed through the gateway",
+            holds="partial",
+            source=_RUNG_SOURCE,
+            detail=f"{_POSTURE_1_MEANS}. Admission, the signed ledger, the signed "
+            "lock and a gateway are all in place; whether this project's config "
+            "points at the gateway and at nothing else could not be read, so no "
+            "gating is claimed",
+        )
+    return PostureLine(
+        claim="This configuration is BELOW posture 1 — the evidence machinery is "
+        "real, the enforcement half is not wired",
+        holds="partial",
+        source=_RUNG_SOURCE,
+        detail=f"{_POSTURE_1_MEANS}. Admission, the signed ledger, the signed lock "
+        "and a gateway are all in place; this project's config does not point at "
+        "the gateway, so no call is gated",
+    )
+
+
 def build_report(
     project: Path,
     store: TeghStore,
@@ -868,8 +1059,9 @@ def build_report(
     from tegh.cluster import cluster_lines, observe, posture_note
     from tegh.harnesses import durability_line
 
-    wrapped = _is_interposed(project, harness, harness_home)
-    gaps = _invariant_gaps(wrapped, _hook_observes(project, harness))
+    routing = _routing(project, harness, harness_home)
+    wrapped = routing.interposed
+    gaps = _invariant_gaps(routing, _hook_observes(project, harness))
 
     # Off-cluster this is empty, and deliberately: a laptop report should not
     # grow a row of "no cluster here" lines. The posture itself is NOT raised by
@@ -882,31 +1074,7 @@ def build_report(
 
     return PostureReport(
         posture="1" if wrapped else "pre-1",
-        rung_reason=PostureLine(
-            claim=(
-                "This configuration is at posture 1 — MCP calls are gated on this one "
-                "machine, by tegh, as the same OS user as the agent"
-                if wrapped
-                else "This configuration is BELOW posture 1 — the evidence machinery is "
-                "real, the enforcement half is not wired"
-            ),
-            holds="partial",
-            source="docs/posture-ladder.md; the harness config's mcpServers block",
-            detail=(
-                "posture 1 means deterministic gating plus taint plus audit honesty on "
-                "one machine, and that is now what this is FOR MCP TOOLS. It is not "
-                "posture 2: tegh runs as the same OS user as the agent it serves, so a "
-                "determined same-user adversary reads and writes tegh's home too. "
-                "The agent's built-in shell, file and web tools are gated by nothing: "
-                "with tegh's hook installed they are observed after they run, and a "
-                "read outside the project taints the turn"
-                if wrapped
-                else "posture 1 means deterministic gating plus taint plus audit honesty "
-                "on one machine. Admission, the signed ledger, the signed lock and a "
-                "gateway are all in place; this project's config does not point at "
-                "the gateway, so no call is gated"
-            ),
-        ),
+        rung_reason=_rung_reason(routing),
         polarity=tuple(_polarity_lines(project, store)),
         holds=tuple(_invariant_holds()),
         gaps=tuple(gaps),

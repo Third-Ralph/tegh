@@ -18,10 +18,10 @@ original proposal's wording and why that is faithful to its reason.
 ## Both branches, not just the one a default report renders
 
 Every check here runs over `_static_lines()`, which assembles the invariant
-lines from BOTH the wrapped and unwrapped branches. A default report in a tmp
-project only renders the unwrapped half, so a citation inside the wrapped line —
-the one that reports the interposition, the line the whole report hangs on — would otherwise never
-be checked by anything. A conformance check blind to the flattering branch is
+lines from EVERY routing state: interposed, and the three that are not. A
+default report in a tmp project only renders one of the unwrapped states, so a
+citation inside the wrapped line — the one that reports the interposition, the
+line the whole report hangs on — would otherwise never be checked by anything. A conformance check blind to the flattering branch is
 the bug it is here to catch, one level up.
 
 ## The network
@@ -61,16 +61,18 @@ from tegh.harnesses import durability_line
 from tegh.lock import Harness
 from tegh.posture import (
     PostureLine,
+    Routing,
     _invariant_gaps,
     _invariant_holds,
-    _interposition_line,
+    _polarity_lines,
+    _rung_reason,
     build_report,
 )
 from tegh.store import TeghStore, provision
 from tegh.tests.citations import (
     Issue,
     RepoPath,
-    CitedTest,
+    CitedSymbol,
     defines,
     parse,
     search_command_prefix,
@@ -169,17 +171,41 @@ _POD_CARRYING_AUTHORITY = replace(
 )
 
 
-def _static_lines() -> list[PostureLine]:
-    """Every line built from literals, across BOTH interposition branches.
+class _NoManifest:
+    """A store whose manifest is never there: the polarity lines read one field
+    from it, and their citations are the same whatever it says."""
 
-    Deduplicated, because the two branches share every gap but the first one:
-    without this a stale citation is reported once per branch, and a failure
+    def manifest_path(self, project) -> Path:
+        return Path(project) / "no-manifest.yaml"
+
+
+_NO_MANIFEST = _NoManifest()
+
+#: One of each state `_routing` can report, so every branch's citations are read.
+_ROUTINGS = (
+    Routing("interposed"),
+    Routing("beside-others", ("notes (user scope)",)),
+    Routing("no-gateway"),
+    Routing("unestablished"),
+)
+
+
+def _static_lines() -> list[PostureLine]:
+    """Every line built from literals, across EVERY routing state.
+
+    Deduplicated, because the states share every gap but the first one:
+    without this a stale citation is reported once per state, and a failure
     message that says everything twice is one people learn to skim.
+
+    The polarity lines are here too. Two of the three are literals that cite
+    platform code, and a report in a tmp project is the only other thing that
+    builds them.
     """
     lines = [*_invariant_holds()]
-    for wrapped in (False, True):
-        lines.append(_interposition_line(wrapped))
-        lines.extend(_invariant_gaps(wrapped))
+    for routing in _ROUTINGS:
+        lines.append(_rung_reason(routing))
+        lines.extend(_invariant_gaps(routing))
+    lines.extend(_polarity_lines(Path("/nonexistent/project"), _NO_MANIFEST))
     lines.append(durability_line(Harness.CLAUDE_CODE))
     lines.append(durability_line("some-future-harness"))
 
@@ -212,7 +238,8 @@ def store(tmp_path) -> TeghStore:
 def _rendered_lines(tmp_path, store, *, wrapped: bool, monkeypatch):
     """A real assembled report, so runtime-built lines are covered too."""
     monkeypatch.setattr(
-        "tegh.posture._is_interposed", lambda *a, **k: wrapped
+        "tegh.posture._routing",
+        lambda *a, **k: Routing("interposed" if wrapped else "no-gateway"),
     )
     project = tmp_path / "proj"
     project.mkdir(exist_ok=True)
@@ -278,14 +305,18 @@ def test_every_cited_line_range_ends_inside_its_file():
     assert len(checked) >= 4, f"expected several cited ranges, matched {checked}"
 
 
-def test_every_cited_test_exists():
-    """A source naming a test asserts that test carries the evidence. If it was
-    renamed or deleted, the claim is left standing on nothing."""
+def test_every_cited_symbol_exists():
+    """A source naming a function, class or test asserts that symbol carries the
+    evidence. If it was renamed or deleted, the claim is left standing on nothing.
+
+    Platform symbols (`safe_agents/...::name`) resolve the way platform paths
+    do, in the installed package, so a pin move that renames one turns this red.
+    """
     checked = []
-    for line, citation in _citations(_static_lines(), CitedTest):
+    for line, citation in _citations(_static_lines(), CitedSymbol):
         resolved = _resolve(citation.path)
         assert resolved.exists(), (
-            f"posture line {line.claim!r} cites test file {citation.path!r}, "
+            f"posture line {line.claim!r} cites file {citation.path!r}, "
             f"which does not exist"
         )
         assert defines(resolved, citation.name), (
@@ -293,9 +324,21 @@ def test_every_cited_test_exists():
             f"{citation.path}::{citation.name}, which that file does not "
             "define — the evidence for this claim has been renamed or removed"
         )
-        checked.append(citation.name)
+        checked.append(f"{citation.path}::{citation.name}")
 
-    assert checked, "expected at least one test-backed citation"
+    assert any(name.startswith("tegh/tests/") for name in checked), checked
+    platform = [name for name in checked if name.startswith(_PLATFORM_PREFIX)]
+    assert len(platform) >= 2, f"expected platform symbol citations, matched {checked}"
+
+
+def test_a_symbol_citation_parses_for_any_function_or_class():
+    """Teeth for the parser half: the form is read whatever the name is, and a
+    name the file does not define is reported as undefined."""
+    (cited,) = parse("tegh/tests/citations.py::defines (the AST lookup)")
+    assert cited == CitedSymbol("tegh/tests/citations.py", "defines")
+    assert defines(REPO_ROOT / cited.path, "defines")
+    assert defines(REPO_ROOT / cited.path, "CitedSymbol")
+    assert not defines(REPO_ROOT / cited.path, "no_such_symbol")
 
 
 # ---------------------------------------------------------------------------

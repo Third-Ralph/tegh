@@ -14,7 +14,11 @@ three citation kinds a machine can settle:
 * `Issue` — `#1`. The claim is *that the issue is still unfixed*, so a CLOSED
   issue makes the line stale by construction. No judgment required, and it
   catches exactly "we fixed the thing and forgot the report".
-* `CitedTest` — `path.py::test_name`. Assertable: the file exists and defines it.
+* `CitedSymbol` — `path.py::name`, for any function or class, a test included.
+  Assertable: the file exists and defines it. This is the citation to prefer for
+  code, because it follows the symbol when the file is edited above it. A
+  `safe_agents/...` path is checked in the installed platform package, the same
+  place a plain path citation of platform code is.
 * `RepoPath` — `path.py` or `path.py:12-19`. The path resolves, and a cited range
   ends inside the file.
 
@@ -39,7 +43,15 @@ which turns every legitimate edit to `store.py` into a posture failure. That is
 "integrity must indict tampering, never evolution" applied here: a check
 that cries stale on honest change teaches people to stop changing the code. So
 the range check is the weakest tier and is labelled as such rather than counted
-as verification.
+as verification. This has happened: five ranges in `posture.py` were found
+pointing at unrelated text while every check here passed. Ranges are now kept
+only for a docstring paragraph, which has no symbol to name, and everything
+that has a symbol is cited as `path.py::name`.
+
+**What a symbol says.** A symbol citation that resolves proves the name is still
+defined in that file. It does not prove the body still does what the claim
+says, and a parenthesis after it (`::_make_pip (human_reachable hardcoded
+True)`) is prose nothing reads.
 
 **Absolute paths.** Runtime citations — a project's `tegh.lock.sig`, a store home
 — name where something is on the machine the report ran on. They are not repo
@@ -103,11 +115,20 @@ class Issue:
 
 
 @dataclass(frozen=True)
-class CitedTest:
-    """`path.py::test_name` — an assertion the named test exists."""
+class CitedSymbol:
+    """`path.py::name` — an assertion that file defines a function or class `name`.
+
+    A test is the common case (`test_x.py::test_name` says that test carries the
+    evidence), and any other function or class is cited the same way in place
+    of a line range.
+    """
 
     path: str
     name: str
+
+
+#: The earlier name, from when only tests were cited this way.
+CitedTest = CitedSymbol
 
 
 @dataclass(frozen=True)
@@ -123,7 +144,7 @@ class RepoPath:
     last_line: int | None = None
 
 
-Citation = Issue | CitedTest | RepoPath
+Citation = Issue | CitedSymbol | RepoPath
 
 
 def parse(source: str) -> list[Citation]:
@@ -153,7 +174,7 @@ def parse(source: str) -> list[Citation]:
         if "::" in token:
             path, _, name = token.partition("::")
             if re.search(_PATH_SUFFIXES, path):
-                found.append(CitedTest(path, name))
+                found.append(CitedSymbol(path, name))
             continue
 
         if "/" not in token:
