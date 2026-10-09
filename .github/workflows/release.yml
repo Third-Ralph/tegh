@@ -9,8 +9,8 @@
 #
 # How a release is cut:
 #
-#   1. Set `version` in pyproject.toml on `main` to a release version and wait
-#      for CI to pass there.
+#   1. Set `version` in pyproject.toml on `main` to a release version, with an
+#      entry for it in docs/posture-review.md, and wait for CI to pass there.
 #   2. Tag that commit `v<version>` and push the tag.
 #   3. Run this workflow against the tag:
 #        gh workflow run release.yml --ref v<version>
@@ -35,6 +35,10 @@
 #   CI not green     the release would be the first run of the suite on that
 #                    commit. A run still in progress counts as not green; wait
 #                    for it and run this again.
+#   no claim review  docs/posture-review.md has no entry for this version on
+#                    this platform pin. `tegh posture` prints claims whose
+#                    citations CI checks and whose truth only a reading
+#                    checks; the entry records that the reading happened.
 #
 # What every run refuses, branch or tag: a dependency stated as a direct URL
 # (`name @ git+https://...`). PyPI rejects an upload whose metadata carries
@@ -129,6 +133,11 @@ jobs:
             echo "::error::No successful CI run for $GITHUB_SHA. Wait for CI on main to pass, then run this again."
             exit 1
           fi
+
+      # Standard library only, so it runs before anything is installed.
+      - name: A posture claim review is recorded for this version
+        if: github.ref_type == 'tag'
+        run: python scripts/check_posture_review.py
 
       - name: Build sdist and wheel
         # requirements/release.txt is `build`, `twine` and the build backend at
