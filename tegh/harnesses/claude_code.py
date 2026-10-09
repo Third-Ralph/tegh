@@ -7,16 +7,22 @@ carrying approval and enablement, the plugin manifest, the enterprise
 machinery it stands on — the result types, the `mcpServers` entry parser, and
 the shadowing resolver — is `tegh/discovery.py`.
 
-This is the FIRST half of `tegh wrap claude`. It is a pure, side-effect-free
+Discovery is the FIRST half of `tegh wrap claude`. It is a pure, side-effect-free
 read of every config scope Claude Code resolves MCP servers from, producing the
 `LockedServer`-shaped record `tegh.lock` needs (TL8/TL9/TL10) plus an explicit
 account of what discovery could NOT see.
 
-**This module writes nothing.** The rewrite half — replacing real servers with
-tegh's gateway — is a separate slice, deliberately not built yet: `claude mcp
-add` does not validate the endpoint it is pointed at
-[`docs/references/harnesses/claude-code.md` §7], so a rewrite landing before the
-gateway is live leaves the user with a `failed` server and no diagnostic.
+**This module writes nothing.** The rewrite half, which replaces real servers
+with tegh's gateway and adds the wrap's hook entry, is built. This module
+supplies its coordinates (`config_sites`, `gateway_entry`, `hook_site` and
+`hook_command`, below); `tegh/interpose.py` and `tegh/hooksite.py` do the
+writing. One ordering constraint on it rests on an inference. The documentation
+says `claude mcp add` saves a configuration "without validating credentials",
+and the reference infers from that sentence, without having observed it, that
+nothing checks the endpoint an entry points at
+[`docs/references/harnesses/claude-code.md` §7]. If that holds, a rewrite
+landing before the gateway is live leaves the user with a `failed` server and
+no diagnostic.
 
 Two of the three load-bearing properties stated in `discovery.py` take their
 concrete Claude Code form here:
@@ -33,9 +39,13 @@ concrete Claude Code form here:
    fields, never footnotes.
 
 The authority for WHERE to look is `docs/references/harnesses/claude-code.md`
-§1, corrected in three places by a live read of one developer machine's `~/.claude.json`
-on 2026-07-25: there is no top-level `mcpServers` key when the user has no
-user-scope servers (absence means empty, never an error); the per-project
+§1, corrected in three places by reading a live `~/.claude.json`. No command
+was run when the documentation was read on 2026-07-25. The reference records
+one of the three, as an observation made on one developer machine on
+2026-07-27 ("Behaviour observed since"): there is no top-level `mcpServers` key
+when the user has no user-scope servers (absence means empty, never an error).
+The other two were observed on a developer machine and are not in the
+reference, so no date is given for them here: the per-project
 approval/enablement keys live in `~/.claude.json` under the project entry, not
 only in `settings.json` as the reference implies; and both a legacy
 (`*McprcServers`) and a current (`*McpjsonServers`) vocabulary are present, so
@@ -88,10 +98,13 @@ from tegh.posture import PostureLine
 #:
 #: 1. There are FIVE documented protected-path outcomes, not two — `dontAsk`
 #:    DENIES (stronger than a prompt), `auto`/`plan` route to a classifier.
-#: 2. An escape lives inside the DEFAULT mode: a prompted write offers a
-#:    session-scoped "allow Claude to edit its own settings for this session"
-#:    opt-in, so one persuaded prompt — the thing an injected agent is
-#:    optimized to obtain — buys the rest of the session.
+#: 2. An escape lives inside the `default` mode: a prompted write offers an
+#:    opt-in that lasts the session, worded per folder since the 2026-10-06
+#:    re-read ("allow Claude to edit files in this project's .claude folder
+#:    for this session"), so one persuaded prompt — the thing an injected agent
+#:    is optimized to obtain — buys the rest of the session. From v2.1.283 the
+#:    built-in starting mode is `auto`, where the write goes to a classifier
+#:    and no human is prompted at all.
 #: 3. The protected-path table names an OUTCOME and never names which TOOLS it
 #:    covers, while the same doc states that `claude mcp remove` and direct
 #:    file edits from a shell are "not gated by Claude Code's own permission
@@ -102,20 +115,43 @@ from tegh.posture import PostureLine
 #: Point 3 may make this the hole other harnesses have between a gated
 #: file-write tool and an ungated terminal tool, with better documentation. Resolving it needs a behavioural test, not another
 #: doc read; see docs/posture-ladder.md on the coverage artifact.
+#:
+#: A wrap writes at TWO sites, and the line covers both: the `mcpServers`
+#: blocks (`config_sites`) and the `PostToolUse` hook entry (`hook_site`). The
+#: one recorded run against a binary concerns the second kind of site only,
+#: and it shows the settings file holding while the script it named did not.
+#: tegh's entry names no script of its own (`tegh/launch.py::hook_argv` is the
+#: installed launcher plus `hook --project --home`), which moves the question
+#: to the launcher and the package behind it without answering it.
 DURABILITY = PostureLine(
     claim="Whether a wrapped Claude Code agent can undo its own wrap is UNRESOLVED",
     holds="unknown",
-    source="docs/references/harnesses/claude-code.md:755-803, 860-874 "
+    source="docs/references/harnesses/claude-code.md:755-803, "
+    "docs/references/harnesses/claude-code.md:860-874, "
+    "docs/references/harnesses/claude-code.md:963-1005 "
     "(the vendor's permission-modes page for the first range; the second records a "
-    "statement with no vendor source)",
-    detail=".mcp.json and .claude.json are hard-coded protected paths evaluated BEFORE "
-    "permission rules, so permissions.allow cannot pre-approve an in-session write — but "
-    "the outcome is a PROMPT, with a session-scoped 'allow Claude to edit its own "
-    "settings for this session' opt-in inside the default mode, and no prompt at all "
-    "under bypassPermissions. Crucially the docs never say which TOOLS the gate covers, "
-    "while the reference records, with no vendor source, that `claude mcp remove` from a "
-    "shell is ungated — the agent has a shell. All of this is a documentation claim: no command was run against a running "
-    "binary when the documentation was read [claude-code.md:963-967]",
+    "statement with no vendor source; the third is what was and was not run against a "
+    "binary); tegh/launch.py for the command the hook entry runs",
+    detail="A wrap writes two things an agent could undo: the mcpServers blocks in "
+    ".mcp.json and ~/.claude.json, and a PostToolUse hook entry in "
+    "<project>/.claude/settings.local.json. Claude Code's hard-coded protected paths "
+    "name .mcp.json, .claude.json and the .claude directory, and are evaluated BEFORE "
+    "permission rules, so permissions.allow cannot pre-approve an in-session write. The "
+    "outcome depends on the mode: a prompt in default and acceptEdits, with an opt-in "
+    "worded per folder that lasts the session; a classifier in auto, the built-in "
+    "starting mode from v2.1.283; a denial in dontAsk; no prompt at all under "
+    "bypassPermissions. The docs never say which TOOLS the gate covers, and the "
+    "reference records, with no vendor source, that `claude mcp remove` from a shell "
+    "outside a session is ungated; whether the agent's own shell can take that path is "
+    "not established. For the MCP config blocks all of this is a documentation claim: no "
+    "attempt to change them from inside a session is recorded. For hooks one headless "
+    "run is recorded, on 2026-10-06 with Claude Code 2.1.292: the agent's writes to the "
+    "project's .claude/settings.json were never granted, and it then overwrote the "
+    "script that hook ran, which sat outside .claude/, after which the next Bash call "
+    "ran. tegh's hook entry was not the hook in that run. It names no script of its own "
+    "and runs tegh through its installed launcher, by absolute path; whether a wrapped "
+    "agent can overwrite that launcher, or the tegh package behind it, is untested, and the "
+    "reference does not record either as a protected path",
 )
 
 #: Which member of the format's one closed catalog this adapter speaks for
@@ -818,10 +854,11 @@ def _apply_managed_exclusivity(
 class _ApprovalState:
     """The per-project approval/enablement lists, merged across their homes.
 
-    Ground truth (live `~/.claude.json`, 2026-07-25) corrects the reference doc
+    A live `~/.claude.json` on a developer machine corrects the reference doc
     here: these keys live on the PROJECT ENTRY in `~/.claude.json`, not only in
     a `settings.json`. Both a current (`*McpjsonServers`) and a legacy
-    (`*McprcServers`) vocabulary occur, so both are read.
+    (`*McprcServers`) vocabulary occur, so both are read. Neither observation
+    is recorded in the reference, so neither carries a date here.
     """
 
     __slots__ = ("approved", "rejected", "enabled", "disabled", "enable_all")

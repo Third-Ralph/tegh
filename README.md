@@ -34,10 +34,12 @@ repository's CI. No community-maintained adapter exists.
 
 What the Claude Code row covers, and where it stops:
 
-- **MCP tools are gated. Built-in tools are observed, not gated.** tegh rewrites the project's
-  Claude Code configuration so that the gateway is its only MCP server, and the broker decides every
-  MCP call. Claude Code's built-in shell, file and network tools do not go through the gateway and
-  nothing tegh does stops one. `tegh wrap` adds a `PostToolUse` hook to the project's
+- **The gateway's MCP tools are gated. Built-in tools are observed, not gated.** tegh rewrites the
+  three configuration blocks it can write for the project (local, project and user scope) so that
+  the gateway is the only MCP server in them, and the broker decides every call to a tool the
+  gateway serves. A server Claude Code loads from somewhere tegh cannot write, such as a plugin or
+  a claude.ai connector, is not behind the gateway. Claude Code's built-in shell, file and network
+  tools do not go through the gateway and nothing tegh does stops one. `tegh wrap` adds a `PostToolUse` hook to the project's
   `.claude/settings.local.json`, which reports each built-in call to the audit tape after it ran. A
   read outside the project, a web fetch or a web search taints the turn, so the agent's next
   external write through the gateway is held for you. A hook that fails, or that the agent manages
@@ -73,7 +75,7 @@ source for each line.
 | Posture | What it is | What tegh does today |
 |---|---|---|
 | 1 | A local wrapper, running as the same OS user as the agent | Built. A wrapped project is at posture 1; `tegh posture` reports an unwrapped one as below it. |
-| 2 | The agent inside a sandbox, the gateway outside, egress to the gateway only | Not built on a Mac. `tegh/openshift/` is a leg that reports posture from inside an OpenShift pod, and the report still reads posture 1 there because it does not attempt the refusals that would prove the containment. |
+| 2 | The agent inside a sandbox, the gateway outside, egress to the gateway and the model provider and nothing else | Not built on a Mac. `tegh/openshift/` is a leg that runs `tegh posture` from inside an OpenShift pod. The project it reports on there is not wrapped, so the posture it derives is `pre-1`, below posture 1. Containment does not raise the posture `tegh posture` prints, and the leg requires the report to mark the pod's egress and RBAC refusals unknown, because the report attempts neither. The shipped transcript records the leg as skipped. |
 | 3 | The broker under its own cloud identity, the agent holding no credentials | Not reachable from tegh. The platform's cloud floor is posture 3, and tegh does not connect a project to it. |
 
 Posture 1 is a boundary against an injected agent: one that follows a poisoned instruction and

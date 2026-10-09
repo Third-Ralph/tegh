@@ -126,7 +126,7 @@ with it. Read the provenance markers. This is the second tool the review shows y
 ```
   --- memory/create_entities ---
   title: Create Entities
-  DESCRIPTION (verbatim, in full — this text steers the model):
+  DESCRIPTION (verbatim, in full: this text steers any model that loads the server directly, without tegh's gateway):
   --- description ---
 Create multiple new entities in the knowledge graph
   input_schema: entities (array, REQUIRED)

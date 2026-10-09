@@ -185,7 +185,8 @@ def render_description_verbatim(description: str) -> str:
     """One description, in full — for a FIRST admission, which has no baseline."""
     return "\n".join(
         [
-            f"{_INDENT}DESCRIPTION (verbatim, in full — this text steers the model):",
+            f"{_INDENT}DESCRIPTION (verbatim, in full: this text steers any model that "
+            "loads the server directly, without tegh's gateway):",
             *_verbatim_block("description", description),
         ]
     )
@@ -195,8 +196,9 @@ def render_description_delta(old: str, new: str) -> str:
     """Both sides verbatim. TL11's steering tier."""
     return "\n".join(
         [
-            f"{_INDENT}!! DESCRIPTION CHANGED (STEERING) — the model-facing injection",
-            f"{_INDENT}   vector. Read both sides; this needs its own acknowledgment.",
+            f"{_INDENT}!! DESCRIPTION CHANGED (STEERING): the injection vector for any",
+            f"{_INDENT}   model that loads the server directly, without tegh's gateway.",
+            f"{_INDENT}   Read both sides; this needs its own acknowledgment.",
             *_verbatim_block("ADMITTED (verbatim)", old),
             *_verbatim_block("LIVE (verbatim)", new),
         ]
