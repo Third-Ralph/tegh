@@ -126,3 +126,24 @@ All reworded.
 - Three adapter comments about vendor behaviour (the environment a spawned server receives,
   ownership of a managed configuration file, plugin cache contents) have no line in the reference
   to check them against.
+
+## 2026-10-08, second reading
+
+Release: none
+Platform: safe-agents 0.75.0
+Commit: 6cd0075
+
+The lines the first review reworded were written and read by the same session. The maintainer, who
+did not write them, read five of them as `tegh posture` renders them and accepted the wording
+unchanged: the posture line for a wrapped project, the interposition line in three of its states
+(interposed, gateway beside other servers, could not be established), and the durability line.
+
+**Not read in this pass.** Every other line, including the ones the first review reworded in
+`cluster.py`, the unsigned-lock and verify-keys details, and the admission review heading. The
+sentence "a read outside the project taints the turn" was read and left as it is, with its open
+finding still tracked privately.
+
+**Pointed out to the reader, and accepted as stated.** The sentence about a managed configuration
+file rests on an adapter docstring and was not checked against the harness reference. The
+durability line's statement that the hook entry names no script of its own is a reading of
+`tegh/launch.py`.
