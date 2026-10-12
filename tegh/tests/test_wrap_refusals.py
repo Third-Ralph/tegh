@@ -427,6 +427,11 @@ _MAP_UNDONE = "this wrap had moved into"
         # run out, so the value is already in tegh's store when the wrap stops.
         pytest.param((), {"input": "\n"}, "[y] admit  [e] edit classification", id="ends-at-a-tool"),
         pytest.param((), {"input": "\ne\n"}, "effect [write]", id="ends-inside-an-edit"),
+        # The command #1 records, verbatim: it used to end in a traceback.
+        pytest.param(
+            ("--no-rewrite",), {"input": "\ne\n"}, "effect [write]",
+            id="ends-inside-an-edit-no-rewrite",
+        ),
     ],
 )
 def test_input_that_ends_at_a_question_refuses_and_moves_nothing(
@@ -464,6 +469,49 @@ def test_a_wrap_that_moved_no_credential_does_not_say_it_undid_one(harness) -> N
     assert "[y] admit  [e] edit classification" in done.stderr
     assert _wrap_state(harness) == before
     assert _MAP_UNDONE not in done.stderr
+
+
+#: Where each answer script leaves the review of a project with no credential
+#: to classify, so the review is the first thing that reads stdin.
+_REVIEW_ENDS = [
+    pytest.param({"closed": True}, "get_entry: [y] admit", id="closed"),
+    pytest.param({"stdin": subprocess.DEVNULL}, "get_entry: [y] admit", id="empty"),
+    pytest.param({"input": "n\n"}, "list_entries: [y] admit", id="at-the-next-tool"),
+    pytest.param({"input": "e\n"}, "effect [write]", id="at-effect"),
+    pytest.param({"input": "e\n\n"}, "reversible [False]", id="at-reversible"),
+    pytest.param({"input": "e\n\n\n"}, "egress_arg [", id="at-egress"),
+    # The edit re-renders and asks about the same tool again.
+    pytest.param({"input": "e\nread\n\n"}, "get_entry: [y] admit", id="after-an-edit"),
+]
+
+
+@pytest.mark.parametrize("flags", [(), ("--no-rewrite",)], ids=["rewrite", "no-rewrite"])
+@pytest.mark.parametrize(("stdin", "left_open"), _REVIEW_ENDS)
+def test_input_that_ends_in_the_tool_review_refuses_and_changes_nothing(
+    harness, flags, stdin, left_open
+) -> None:
+    """Every question the review asks, met by a real process whose input ran out.
+
+    `closed` is `<&-` from a shell, the rest an exhausted pipe; no prompt is
+    stood in for. Nothing under the test's root may differ afterwards, the
+    harness config least of all, because a refused wrap is one that did nothing.
+    """
+    assert main(["init"]) == 0
+    root = harness["home"].parent
+    config = harness["claude_json"].read_bytes()
+    before = fingerprint(root)
+
+    done = run_wrap(harness, *flags, **stdin)
+
+    assert "Traceback" not in done.stderr, done.stderr
+    assert done.returncode == 2, done.stderr
+    refusal = done.stderr.strip()
+    assert refusal.startswith(_ENDED), refusal
+    assert len(refusal.splitlines()) == 1, refusal
+    assert f"the one left open was `{left_open}" in refusal, refusal
+    assert "Nothing was wrapped" in refusal
+    assert harness["claude_json"].read_bytes() == config
+    assert fingerprint(root) == before
 
 
 def _a_leaf_of_another_server(wrapped: dict) -> tuple:
