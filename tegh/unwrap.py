@@ -29,11 +29,13 @@ it, and the list says so. Anything added to it since keeps the file, holding
 just that: the empty entry the wrap made for the project goes, on a line of its
 own. A file that was there before the wrap is never removed.
 
-The hook a wrap added to the harness's settings comes out the same way
-(`hooksite.py`): only the entry that runs tegh's hook command, recorded in the
-backup, and the settings file and its directory when the wrap created them and
-nothing else is left in them. A hook added since is kept. A backup written
-before tegh added a hook records none, and its unwrap has none to take out.
+The hooks a wrap added to the harness's settings come out the same way
+(`hooksite.py`): only the entries that run tegh's hook command, under the
+events the backup says the wrap added to (`PreToolUse` and `PostToolUse`, or
+`PostToolUse` alone for a wrap by 0.3.0), and the settings file and its
+directory when the wrap created them and nothing else is left in them. A hook
+added since is kept. A backup written before tegh added a hook records none,
+and its unwrap has none to take out.
 
 ## The credential ends in exactly one place, and never in none
 
@@ -187,11 +189,13 @@ class UnwrapPlan:
         if self.hook is not None and self.hook.found:
             label = self.hook.site.label
             beside = ", keeping the hooks added beside it" if self.hook.shared else ""
+            events = " and ".join(self.hook.events_found)
+            entries = "entries" if len(self.hook.events_found) > 1 else "entry"
             actions.append(
                 Action(
                     "remove",
                     "removed",
-                    f"{label}  (tegh's {self.hook.backup.event} hook entry{beside})",
+                    f"{label}  (tegh's {events} hook {entries}{beside})",
                 )
             )
         if self.hook is not None and self.hook.removes_file:

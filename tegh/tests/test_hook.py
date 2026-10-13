@@ -1,14 +1,15 @@
-"""`tegh hook`, without a gateway: what it classifies, what it sends, and that it never gates.
+"""`tegh hook`, without a gateway: what it classifies, what it sends, what it relays.
 
-Nothing here starts a broker. A report's body is caught by a stdlib HTTP server
-on a thread, standing where the gateway's tool-event mouth would, so a test can
-say exactly which bytes left the process. The real mouth, the real tape and the
-taint it causes are `test_hook_e2e.py`.
+Nothing here starts a broker. A request's or a report's body is caught by a
+stdlib HTTP server on a thread, standing where the gateway's tool-event mouth
+would, so a test can say exactly which bytes left the process, and the answer
+it gives is the test's. The real mouth, the real tape and the taint it causes
+are `test_hook_e2e.py`.
 
-The event fixture under `events/` is built from the field list in
-`docs/references/harnesses/claude-code.md` §3 ("Hook input"). It was not
+The event fixtures under `events/` are built from the field list in
+`docs/references/harnesses/claude-code.md` §3 ("Hook input"). They were not
 captured from a running Claude Code, and the shape of a `Read` tool response is
-undocumented there, so the response in it is illustrative.
+undocumented there, so the response in the `PostToolUse` one is illustrative.
 """
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ import json
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -29,7 +31,17 @@ from tegh.cli import main
 from tegh.store import TeghStore
 
 EVENT_FIXTURE = Path(__file__).with_name("events") / "post_tool_use_read.json"
+PRE_EVENT_FIXTURE = Path(__file__).with_name("events") / "pre_tool_use_bash.json"
 TOKEN = "t" * 64
+
+#: A refusal's text as the broker spells it (`broker/GATEWAY.md` G38), with a
+#: quote, a non-ASCII character and a newline in its reason, so a relay that
+#: re-spells anything shows.
+REFUSED_TEXT = (
+    "Refused by policy. Do not attempt the same action another way. Tell the user "
+    "what was refused, and continue with any part of the task this does not affect. "
+    'Reason: no manifest entry for harness-tool.shell/unknown ("é")\nsecond line'
+)
 
 #: A tool the wrapped gateway serves, as Claude Code names it.
 GATEWAY_TOOL = "mcp__tegh__ledger__get_entry"
@@ -37,6 +49,12 @@ GATEWAY_TOOL = "mcp__tegh__ledger__get_entry"
 
 def recorded_event(**changes) -> dict:
     event = json.loads(EVENT_FIXTURE.read_text(encoding="utf-8"))
+    event.update(changes)
+    return event
+
+
+def pre_event(**changes) -> dict:
+    event = json.loads(PRE_EVENT_FIXTURE.read_text(encoding="utf-8"))
     event.update(changes)
     return event
 
@@ -221,6 +239,7 @@ def test_an_mcp_tool_the_gateway_does_not_serve_is_reported_as_unbrokered(places
         "locality": "unknown",
         "subject_digest": _sha(event["tool_name"]),
         "result_digest": hook.result_digest(event["tool_response"]),
+        "call_digest": _sha(event["tool_use_id"]),
     }
 
 
@@ -237,11 +256,13 @@ def test_only_a_listed_internal_tool_goes_unreported(places):
     )
 
 
-def test_a_report_is_five_leaves_and_nothing_from_the_event(places):
-    """No path, URL, command, content or session id is in what leaves."""
+def test_a_report_is_six_leaves_and_nothing_from_the_event(places):
+    """No path, URL, command, content, session id or call id is in what leaves."""
     event = recorded_event()
     report = hook.report_of(event, project=places["project"], home=places["home"])
-    assert set(report) == {"harness", "tool_class", "locality", "subject_digest", "result_digest"}
+    assert set(report) == {
+        "harness", "tool_class", "locality", "subject_digest", "result_digest", "call_digest",
+    }
     sent = json.dumps(report)
     for leaked in (
         event["session_id"], event["cwd"], event["transcript_path"],
@@ -255,7 +276,27 @@ def test_an_event_with_no_tool_response_carries_no_result_digest(places):
     event = recorded_event()
     del event["tool_response"]
     report = hook.report_of(event, project=places["project"], home=places["home"])
-    assert set(report) == {"harness", "tool_class", "locality", "subject_digest"}
+    assert set(report) == {"harness", "tool_class", "locality", "subject_digest", "call_digest"}
+
+
+@pytest.mark.parametrize(
+    ("changes", "expected"),
+    [
+        pytest.param({}, _sha("toolu_00000000000000000000000000"), id="tool_use_id"),
+        pytest.param({"tool_use_id": None}, None, id="null"),
+        pytest.param({"tool_use_id": 7}, None, id="not a string"),
+        pytest.param({"tool_use_id": ...}, None, id="absent"),
+    ],
+)
+def test_a_report_carries_the_call_digest_only_when_the_event_has_a_call_id(
+    places, changes, expected
+):
+    """So the report pairs on the tape with the decision asked before the call (G23)."""
+    event = recorded_event(**changes)
+    if event.get("tool_use_id") is ...:
+        del event["tool_use_id"]
+    report = hook.report_of(event, project=places["project"], home=places["home"])
+    assert report.get("call_digest") == expected
 
 
 # ---------------------------------------------------------------------------
@@ -266,8 +307,11 @@ def test_an_event_with_no_tool_response_carries_no_result_digest(places):
 class _Mouth:
     """A loopback HTTP server that records what it was sent and answers `status`."""
 
-    def __init__(self, status: int = 200) -> None:
+    def __init__(self, status: int = 200, body: bytes = b'{"source":null}', **headers) -> None:
         self.status = status
+        self.body = body
+        self.headers = headers
+        self.delay = 0.0
         self.requests: list[dict] = []
         mouth = self
 
@@ -281,10 +325,14 @@ class _Mouth:
                         "body": self.rfile.read(length),
                     }
                 )
-                body = b'{"source":null}'
+                if mouth.delay:
+                    time.sleep(mouth.delay)
+                body = mouth.body
                 self.send_response(mouth.status)
                 self.send_header("content-type", "application/json")
                 self.send_header("content-length", str(len(body)))
+                for name, value in mouth.headers.items():
+                    self.send_header(name, value)
                 self.end_headers()
                 self.wfile.write(body)
 
@@ -293,7 +341,10 @@ class _Mouth:
 
         self.server = HTTPServer(("127.0.0.1", 0), Handler)
         self.port = self.server.server_address[1]
-        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        # A short poll, so a test's `shutdown` returns at once and not after 0.5 s.
+        self.thread = threading.Thread(
+            target=self.server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True
+        )
 
     def __enter__(self):
         self.thread.start()
@@ -345,6 +396,7 @@ def test_a_report_is_posted_to_the_mouth_with_the_token_and_nothing_else(wired, 
         "locality": "home",
         "subject_digest": _sha(str(target)),
         "result_digest": hook.result_digest(event["tool_response"]),
+        "call_digest": _sha(event["tool_use_id"]),
     }
 
 
@@ -429,7 +481,8 @@ def test_a_bad_invocation_is_one_line_and_exit_0(wired, capsys, argv, stdin):
 @pytest.mark.parametrize(
     "event",
     [
-        recorded_event(hook_event_name="PreToolUse"),
+        recorded_event(hook_event_name="SessionStart"),
+        recorded_event(hook_event_name="PostToolUseFailure"),
         recorded_event(tool_name=GATEWAY_TOOL),
         recorded_event(tool_name="ToolSearch"),
     ],
@@ -441,12 +494,321 @@ def test_an_ignored_event_posts_nothing_and_says_nothing(wired, capsys, event):
     assert mouth.requests == []
 
 
-def test_the_cli_routes_hook_past_argparse_so_a_bad_command_line_still_exits_0(capsys):
-    """argparse answers a bad command line with exit 2, which the harness shows the model."""
-    assert main(["hook", "--nonsense"]) == 0
+def test_an_event_that_is_neither_pre_nor_post_is_silent_even_with_a_bad_command_line(capsys):
+    event = recorded_event(hook_event_name="Stop")
+    assert _run(["--bogus"], event, capsys) == (0, "", "")
+
+
+@pytest.mark.parametrize(
+    ("event", "status", "prefix"),
+    [
+        pytest.param(recorded_event(), 0, hook.PREFIX, id="PostToolUse"),
+        pytest.param(pre_event(), hook.EXIT_NOT_DECIDED, hook.DECIDE_PREFIX, id="PreToolUse"),
+    ],
+)
+def test_the_cli_routes_hook_past_argparse_and_passes_its_status_through(
+    capsys, monkeypatch, event, status, prefix
+):
+    """argparse answers a bad command line with exit 2 whatever the event.
+
+    For `PostToolUse` that would show the model stderr; for `PreToolUse` the
+    hook chooses 2 itself, with its own line.
+    """
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(event)))
+    assert main(["hook", "--nonsense"]) == status
     out, err = capsys.readouterr()
     assert out == ""
-    assert err.startswith(hook.PREFIX)
+    assert err.count("\n") == 1 and err.startswith(prefix), err
+
+
+def test_a_redirect_is_not_followed_so_the_token_goes_nowhere_else(wired, capsys):
+    with _Mouth() as elsewhere:
+        target = f"http://127.0.0.1:{elsewhere.port}/events"
+        with _Mouth(status=302, body=b"", Location=target) as mouth:
+            wired["listen"](f"127.0.0.1:{mouth.port}")
+            status, out, err = _run(wired["argv"], recorded_event(), capsys)
+    assert (status, out) == (0, "")
+    assert err == f"{hook.PREFIX}the tool-event mouth answered 302\n"
+    assert len(mouth.requests) == 1
+    assert elsewhere.requests == []
+
+
+# ---------------------------------------------------------------------------
+# PreToolUse: the request, and the answer relayed
+# ---------------------------------------------------------------------------
+
+
+def _answer(answer: str, text=None, intent_id=None, reason="r") -> bytes:
+    return json.dumps(
+        {"answer": answer, "reason": reason, "intent_id": intent_id, "text": text}
+    ).encode("utf-8")
+
+
+PERMIT = _answer("permit")
+REFUSE = _answer("refuse", text=REFUSED_TEXT, reason="no manifest entry")
+
+
+def test_the_allow_and_deny_lines_are_the_harness_shapes_and_one_line_each():
+    assert json.loads(hook.allow_output()) == {
+        "hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow"}
+    }
+    assert json.loads(hook.deny_output(REFUSED_TEXT)) == {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": REFUSED_TEXT,
+        }
+    }
+    assert "\n" not in hook.allow_output() + hook.deny_output(REFUSED_TEXT)
+
+
+def test_a_decision_request_is_six_keys_with_the_right_digests(wired, capsys):
+    """G31: six leaves, each recomputed here from the event, and nothing from the event."""
+    event = pre_event()
+    with _Mouth(body=PERMIT) as mouth:
+        wired["listen"](f"127.0.0.1:{mouth.port}")
+        assert _run(wired["argv"], event, capsys) == (0, hook.allow_output() + "\n", "")
+
+    (request,) = mouth.requests
+    assert request["path"] == "/decide"
+    assert request["headers"]["authorization"] == f"Bearer {TOKEN}"
+    assert request["headers"]["content-type"] == "application/json"
+    canonical_input = json.dumps(
+        event["tool_input"], sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    assert json.loads(request["body"]) == {
+        "harness": "claude-code",
+        "tool_class": "shell",
+        "locality": "unknown",
+        "subject_digest": _sha(event["tool_input"]["command"]),
+        "input_digest": _sha(canonical_input),
+        "call_digest": _sha(event["tool_use_id"]),
+    }
+    for leaked in (
+        event["tool_input"]["command"], event["tool_use_id"], event["session_id"], event["cwd"],
+        "outside-the-project",
+    ):
+        assert leaked.encode("utf-8") not in request["body"]
+    assert len(request["body"]) < 4096
+
+
+def test_the_request_and_the_report_for_one_call_carry_the_same_call_digest(places):
+    pre = pre_event(tool_use_id="toolu_pair")
+    post = recorded_event(tool_use_id="toolu_pair")
+    request = hook.request_of(pre, project=places["project"], home=places["home"])
+    report = hook.report_of(post, project=places["project"], home=places["home"])
+    assert request["call_digest"] == report["call_digest"] == _sha("toolu_pair")
+
+
+def test_a_missing_tool_input_is_digested_as_null(places):
+    event = pre_event()
+    del event["tool_input"]
+    request = hook.request_of(event, project=places["project"], home=places["home"])
+    assert request["input_digest"] == _sha("null")
+    assert request["subject_digest"] == _sha("")
+
+
+def test_an_mcp_tool_the_gateway_does_not_serve_is_asked_about_as_unbrokered(wired, capsys):
+    event = pre_event(tool_name="mcp__plugin_notes_vault__read_note", tool_input={"id": 1})
+    with _Mouth(body=PERMIT) as mouth:
+        wired["listen"](f"127.0.0.1:{mouth.port}")
+        assert _run(wired["argv"], event, capsys)[0] == 0
+    body = json.loads(mouth.requests[0]["body"])
+    assert (body["harness"], body["tool_class"], body["locality"]) == (
+        "claude-code-mcp",
+        "other",
+        "unknown",
+    )
+    assert body["subject_digest"] == _sha(event["tool_name"])
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        pytest.param(REFUSE, id="refuse"),
+        pytest.param(
+            _answer("refuse", text=REFUSED_TEXT, intent_id="intent-1", reason="held"), id="hold"
+        ),
+    ],
+)
+def test_a_refuse_relays_the_brokers_text_verbatim_and_nothing_else(wired, capsys, answer):
+    with _Mouth(body=answer) as mouth:
+        wired["listen"](f"127.0.0.1:{mouth.port}")
+        status, out, err = _run(wired["argv"], pre_event(), capsys)
+    assert (status, err) == (0, "")
+    assert out == hook.deny_output(REFUSED_TEXT) + "\n"
+    reason = json.loads(out)["hookSpecificOutput"]["permissionDecisionReason"]
+    assert reason == json.loads(answer)["text"]
+
+
+def test_a_permit_prints_allow_whatever_else_the_answer_carries(wired, capsys):
+    answer = _answer("permit", text="ignored", reason="granted")
+    with _Mouth(body=answer) as mouth:
+        wired["listen"](f"127.0.0.1:{mouth.port}")
+        assert _run(wired["argv"], pre_event(), capsys) == (0, hook.allow_output() + "\n", "")
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        pytest.param(pre_event(tool_name=GATEWAY_TOOL), id="gateway tool"),
+        pytest.param(
+            pre_event(tool_name=GATEWAY_TOOL, mcp_server={"name": "tegh", "source": "local"}),
+            id="gateway tool, server named",
+        ),
+        pytest.param(
+            pre_event(tool_name=GATEWAY_TOOL, tool_use_id=None), id="gateway tool, no call id"
+        ),
+    ],
+)
+def test_a_tool_the_gateway_serves_is_allowed_without_asking(wired, capsys, event):
+    """The broker decides that call at the gateway; a second decision here would be a
+    second decider. Nothing is posted, so no address is needed either."""
+    with _Mouth(body=_answer("refuse", text="must not be asked")) as mouth:
+        wired["listen"](f"127.0.0.1:{mouth.port}")
+        assert _run(wired["argv"], event, capsys) == (0, hook.allow_output() + "\n", "")
+    assert mouth.requests == []
+
+
+def test_a_server_wearing_the_gateway_prefix_is_asked_about(wired, capsys):
+    event = pre_event(tool_name="mcp__tegh__x__get", mcp_server={"name": "tegh__x"})
+    with _Mouth(body=REFUSE) as mouth:
+        wired["listen"](f"127.0.0.1:{mouth.port}")
+        assert _run(wired["argv"], event, capsys)[1] == hook.deny_output(REFUSED_TEXT) + "\n"
+    assert len(mouth.requests) == 1
+
+
+def test_a_harness_internal_tool_prints_nothing_and_asks_nothing(wired, capsys):
+    with _Mouth(body=REFUSE) as mouth:
+        wired["listen"](f"127.0.0.1:{mouth.port}")
+        assert _run(wired["argv"], pre_event(tool_name="ToolSearch"), capsys) == (0, "", "")
+    assert mouth.requests == []
+
+
+def _listening(answer: bytes, status: int = 200, **headers):
+    def arrange(w, mouth):
+        mouth.body, mouth.status, mouth.headers = answer, status, headers
+        w["listen"](f"127.0.0.1:{mouth.port}")
+
+    return arrange
+
+
+def _closed(address: str):
+    def arrange(w, mouth):
+        w["listen"](address.format(port=mouth.closed_port))
+
+    return arrange
+
+
+@pytest.mark.parametrize(
+    ("arrange", "event", "cause"),
+    [
+        pytest.param(lambda w, m: None, pre_event(), "no tool-event mouth address", id="no address"),
+        pytest.param(
+            _closed("127.0.0.1:{port}"), pre_event(), "could not be reached", id="nothing listening"
+        ),
+        pytest.param(
+            _closed("example.com:80"), pre_event(), "not a loopback port", id="not loopback"
+        ),
+        pytest.param(_closed("garbage"), pre_event(), "not host:port", id="malformed address"),
+        pytest.param(
+            lambda w, m: (
+                _listening(PERMIT)(w, m),
+                w["store"].gateway_token_path(w["project"]).unlink(),
+            ),
+            pre_event(),
+            "no launch token",
+            id="no token",
+        ),
+        pytest.param(_listening(b"", 401), pre_event(), "answered 401", id="401"),
+        pytest.param(_listening(b"", 400), pre_event(), "answered 400", id="400"),
+        pytest.param(_listening(b"", 500), pre_event(), "answered 500", id="500"),
+        pytest.param(_listening(PERMIT, 202), pre_event(), "answered 202", id="202"),
+        pytest.param(
+            _listening(b"", 302, Location="http://127.0.0.1:9/decide"),
+            pre_event(),
+            "answered 302",
+            id="redirect",
+        ),
+        pytest.param(_listening(b"permit"), pre_event(), "not JSON", id="body not JSON"),
+        pytest.param(_listening(b'["permit"]'), pre_event(), "not a JSON object", id="not object"),
+        pytest.param(
+            _listening(_answer("allow")), pre_event(), "neither permit nor refuse", id="other word"
+        ),
+        pytest.param(
+            _listening(b'{"reason":"r"}'), pre_event(), "neither permit nor refuse", id="no answer"
+        ),
+        pytest.param(
+            _listening(_answer("refuse", text=None)), pre_event(), "no text", id="refuse, null text"
+        ),
+        pytest.param(
+            _listening(_answer("refuse", text=7)), pre_event(), "no text", id="refuse, text a number"
+        ),
+        pytest.param(
+            _listening(PERMIT), pre_event(tool_use_id=None), "no tool_use_id", id="no call id"
+        ),
+        pytest.param(_listening(PERMIT), pre_event(tool_name=None), "names no tool", id="no tool"),
+    ],
+)
+def test_every_pre_failure_is_one_line_on_stderr_nothing_on_stdout_and_exit_2(
+    wired, capsys, arrange, event, cause
+):
+    """Exit 2 blocks the call whatever stdout holds (reference §3, "Failure semantics")."""
+    with _Mouth() as closed:
+        closed_port = closed.port
+    with _Mouth() as mouth:
+        mouth.closed_port = closed_port
+        arrange(wired, mouth)
+        status, out, err = _run(wired["argv"], event, capsys)
+    assert (status, out) == (hook.EXIT_NOT_DECIDED, "")
+    assert err.count("\n") == 1 and err.startswith(hook.DECIDE_PREFIX), err
+    assert cause in err
+    assert "outside-the-project" not in err
+
+
+def test_a_decision_that_does_not_come_in_time_is_exit_2(wired, capsys, monkeypatch):
+    monkeypatch.setattr(hook, "DECIDE_TIMEOUT_SECONDS", 0.2)
+    with _Mouth(body=PERMIT) as mouth:
+        mouth.delay = 1.0
+        wired["listen"](f"127.0.0.1:{mouth.port}")
+        status, out, err = _run(wired["argv"], pre_event(), capsys)
+    assert (status, out) == (hook.EXIT_NOT_DECIDED, "")
+    assert err == f"{hook.DECIDE_PREFIX}the tool-event mouth did not answer in time\n"
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        pytest.param(["--project"], id="flag with no value"),
+        pytest.param(["--bogus", "x"], id="unknown flag"),
+        pytest.param([], id="no project"),
+    ],
+)
+def test_a_bad_command_line_on_a_pre_event_is_exit_2(capsys, argv):
+    status, out, err = _run(argv, pre_event(), capsys)
+    assert (status, out) == (hook.EXIT_NOT_DECIDED, "")
+    assert err.count("\n") == 1 and err.startswith(hook.DECIDE_PREFIX), err
+
+
+def test_an_unexpected_error_on_a_pre_event_is_exit_2(wired, capsys, monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(hook, "locality", boom)
+    status, out, err = _run(wired["argv"], pre_event(), capsys)
+    assert (status, out, err) == (
+        hook.EXIT_NOT_DECIDED,
+        "",
+        f"{hook.DECIDE_PREFIX}RuntimeError\n",
+    )
+
+
+def test_an_unexpected_error_on_a_post_event_is_still_exit_0(wired, capsys, monkeypatch):
+    def boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(hook, "locality", boom)
+    assert _run(wired["argv"], recorded_event(), capsys) == (0, "", f"{hook.PREFIX}RuntimeError\n")
 
 
 def test_tegh_hook_loads_nothing_from_the_platform():
