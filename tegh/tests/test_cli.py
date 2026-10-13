@@ -19,10 +19,15 @@ from pathlib import Path
 
 import pytest
 
+from safe_agents.broker.schemas.harness_tool import HARNESS_TOOL, ToolClass
 from safe_agents.broker.schemas.manifest import AgentManifest
+from tegh import hook
 from tegh.cli import (
     ADAPTERS,
     HARNESS_ALIASES,
+    HARNESS_TOOL_CLASSES,
+    HARNESS_TOOL_OPS,
+    _parse_args,
     _synthesize_manifest,
     main,
 )
@@ -118,6 +123,112 @@ class TestSynthesizedManifestIsAccepted:
         holding no polarity of its own."""
         payload = _synthesize_manifest([_stdio()], polarity=polarity, **_MANIFEST_CTX)
         assert payload["envelope"]["polarity"] == polarity
+
+
+def _coordinates_the_hook_can_ask_about() -> set[str]:
+    """Every `<tool_class>/<locality>` `tegh hook` produces, found by running it.
+
+    Each tool the hook's table names, and one it does not, is classified at a
+    path in the project, in the home directory, outside both, and at a relative
+    and a missing path. What comes back is the hook's own answer, so a class or
+    locality the hook learns to emit shows up here without this test knowing.
+    """
+    project, home = Path("/proj"), Path("/home-of-you")
+    probes = [
+        {"file_path": "/proj/src/a.py", "notebook_path": "/proj/a.ipynb"},
+        {"file_path": "/home-of-you/notes.md", "notebook_path": "/home-of-you/a.ipynb"},
+        {"file_path": "/etc/hosts", "notebook_path": "/etc/a.ipynb"},
+        {"file_path": "relative.md", "notebook_path": "relative.ipynb"},
+        {},
+    ]
+    found = set()
+    for name in [*hook.TOOL_TABLE, "SomeToolNobodyListed"]:
+        for tool_input in probes:
+            where = hook.locality(name, tool_input, project=project, home=home)
+            found.add(f"{hook.tool_class(name)}/{where}")
+    return found
+
+
+#: The facts each reserved coordinate is declared with, by class and locality
+#: group. `reversible` is absent on a read.
+_EXPECTED_FACTS = {
+    "file-read/project": ("read", False, None),
+    "file-read/home": ("read", True, None),
+    "file-read/outside": ("read", True, None),
+    "file-read/unknown": ("read", True, None),
+    "file-write/project": ("write", False, True),
+    "file-edit/project": ("write", False, True),
+    **{
+        f"{kind}/{where}": ("write", True, True)
+        for kind in ("file-write", "file-edit")
+        for where in ("home", "outside", "unknown")
+    },
+    "shell/unknown": ("write", False, True),
+    "web-fetch/remote": ("read", True, None),
+    "web-search/remote": ("read", True, None),
+    "other/unknown": ("write", False, True),
+}
+
+
+class TestHarnessCoordinates:
+    """The reserved coordinates the broker decides a built-in call at (G30)."""
+
+    def test_the_manifest_declares_every_coordinate_the_hook_can_ask_about(self) -> None:
+        declared = {op["op"] for op in HARNESS_TOOL_OPS}
+        assert declared == _coordinates_the_hook_can_ask_about()
+        assert len(HARNESS_TOOL_OPS) == len(declared) == 16
+
+    @pytest.mark.parametrize("coordinate", sorted(_EXPECTED_FACTS))
+    def test_each_coordinate_is_declared_with_its_facts(self, coordinate: str) -> None:
+        (entry,) = [op for op in HARNESS_TOOL_OPS if op["op"] == coordinate]
+        assert entry["tool"] == HARNESS_TOOL
+        assert (entry["effect"], entry["external"], entry["reversible"]) == (
+            _EXPECTED_FACTS[coordinate]
+        )
+        expected_destination = "subject" if coordinate == "web-fetch/remote" else None
+        assert entry["destination_arg"] == expected_destination
+
+    def test_every_manifest_declares_and_grants_them(self) -> None:
+        payload = _synthesize_manifest([_stdio()], polarity="abstain", **_MANIFEST_CTX)
+        manifest = AgentManifest.model_validate(payload)
+        reserved = {op.op for op in manifest.tool_ops if op.tool == HARNESS_TOOL}
+        assert reserved == {op["op"] for op in HARNESS_TOOL_OPS}
+        assert {f"{HARNESS_TOOL}.{op}" for op in reserved} <= set(payload["grant_classes"])
+
+    def test_the_taint_hold_is_declared_and_empty_by_default(self) -> None:
+        payload = _synthesize_manifest([_stdio()], polarity="abstain", **_MANIFEST_CTX)
+        assert payload["envelope"]["tainted_harness_hold"] == []
+        assert AgentManifest.model_validate(payload).envelope.tainted_harness_hold == []
+
+    def test_a_held_class_is_carried_and_the_base_accepts_it(self) -> None:
+        payload = _synthesize_manifest(
+            [_stdio()], polarity="abstain", hold_on_taint=("shell",), **_MANIFEST_CTX
+        )
+        held = AgentManifest.model_validate(payload).envelope.tainted_harness_hold
+        assert [c.value for c in held] == ["shell"]
+
+    def test_the_flag_offers_exactly_the_bases_tool_classes(self) -> None:
+        assert set(HARNESS_TOOL_CLASSES) == {c.value for c in ToolClass}
+
+    def test_the_flag_repeats_and_names_each_class_once(self) -> None:
+        from tegh.cli import _held_when_tainted, _wrap_again
+        from tegh.store import TeghStore
+
+        args = _parse_args(
+            [
+                "wrap", "claude", "--project", "/proj",
+                "--hold-when-tainted", "shell",
+                "--hold-when-tainted", "web-fetch",
+                "--hold-when-tainted", "shell",
+            ]
+        )
+        assert _held_when_tainted(args) == ("shell", "web-fetch")
+        again = _wrap_again(args, TeghStore(home=Path("/h")), Path("/proj"))
+        assert again.endswith("--hold-when-tainted shell --hold-when-tainted web-fetch")
+
+    def test_the_flag_refuses_a_class_outside_the_set(self) -> None:
+        with pytest.raises(SystemExit):
+            _parse_args(["wrap", "claude", "--project", "/proj", "--hold-when-tainted", "bash"])
 
 
 class TestHarnessSelection:

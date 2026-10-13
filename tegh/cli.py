@@ -55,6 +55,7 @@ from safe_agents.broker.schemas import (
     ToolOp,
     compute_tool_def_hash,
 )
+from safe_agents.broker.schemas.harness_tool import HARNESS_TOOL
 from tegh.classify import (
     CorrectionRefused,
     ToolOpProposal,
@@ -72,6 +73,7 @@ from tegh import interpose
 from tegh import unwrap
 from tegh.harnesses import claude_code, hook_config_site
 from tegh.hook import HARNESS_CODE as HOOK_HARNESS_CODE
+from tegh.hook import FILE_CLASSES, OTHER_CLASS, TOOL_TABLE, WEB_CLASSES
 from tegh.hook import hook_main, mouth_is_listening
 from tegh.launch import (
     BROKER_INHERITED_ENV_VARS,
@@ -140,6 +142,74 @@ _CEREMONY = python_module_argv("safe_agents.broker.mcp.commands")
 #: inside the project, as `tegh hook` classifies it (`hook.py`). The source id
 #: is the broker's `harness:<harness>/<tool_class>/<locality>`.
 TRUSTED_HARNESS_READS: tuple[str, ...] = (f"harness:{HOOK_HARNESS_CODE}/file-read/project",)
+
+#: The localities `tegh hook` can put a tool class at (`hook.locality`): a
+#: file class at any of four, a web class only `remote`, everything else only
+#: `unknown`.
+_FILE_LOCALITIES = ("project", "home", "outside", "unknown")
+
+
+def _harness_tool_op(tool_class: str, locality: str) -> dict:
+    """The `tool_ops` entry for one reserved coordinate, by the rules at `HARNESS_TOOL_OPS`."""
+    if tool_class == "file-read":
+        facts: dict = {"effect": "read", "external": locality != "project"}
+    elif tool_class in WEB_CLASSES:
+        facts = {"effect": "read", "external": True}
+        if tool_class == "web-fetch":
+            facts["destination_arg"] = "subject"
+    elif tool_class in FILE_CLASSES:
+        facts = {"effect": "write", "external": locality != "project", "reversible": True}
+    else:
+        facts = {"effect": "write", "external": False, "reversible": True}
+    return ToolOp(tool=HARNESS_TOOL, op=f"{tool_class}/{locality}", **facts).model_dump(
+        mode="json"
+    )
+
+
+def _harness_coordinates() -> tuple[tuple[str, str], ...]:
+    """Every `(tool_class, locality)` `tegh hook` can ask about, in a fixed order."""
+    classes = sorted({kind for kind, _ in TOOL_TABLE.values()} | {OTHER_CLASS})
+    coordinates: list[tuple[str, str]] = []
+    for kind in classes:
+        if kind in FILE_CLASSES:
+            coordinates.extend((kind, where) for where in _FILE_LOCALITIES)
+        elif kind in WEB_CLASSES:
+            coordinates.append((kind, "remote"))
+        else:
+            coordinates.append((kind, "unknown"))
+    return tuple(coordinates)
+
+
+#: The reserved coordinates this project's manifest declares and grants, one
+#: per `(tool_class, locality)` the hook can ask about (G30). The broker decides
+#: a built-in call from these facts alone and refuses a coordinate with no
+#: entry, so a class the hook can emit and this table leaves out would be
+#: refused on every call.
+#:
+#: These facts are tegh's CLASSIFICATION of what its adapter reports, made once
+#: here; they are not an observation of any call. The hook knows a call's tool
+#: name and where its path resolved, and nothing about what a shell command or
+#: an unknown tool actually reached. So:
+#:
+#: - A file read inside the project is a non-external read; anywhere else it is
+#:   an external read. A web fetch or search is an external read, and the
+#:   fetch names its destination (`destination_arg`), which is inert while the
+#:   envelope's `escalate_composed_destinations` is off.
+#: - A file write or edit is a reversible write, external outside the project.
+#: - A shell command and any other tool are a reversible, NON-external write,
+#:   the shape of the platform's own example (`broker/SCHEMAS.md` §2). Calling
+#:   them external would put every shell call on a tainted turn on hold, which
+#:   is what `wrap --hold-when-tainted shell` asks for when a consumer wants it.
+HARNESS_TOOL_OPS: tuple[dict, ...] = tuple(
+    _harness_tool_op(kind, where) for kind, where in _harness_coordinates()
+)
+
+#: The classes `wrap --hold-when-tainted` accepts: the broker's closed set, in
+#: the order the hook's table names them.
+HARNESS_TOOL_CLASSES: tuple[str, ...] = tuple(
+    dict.fromkeys([*(kind for kind, _ in TOOL_TABLE.values()), OTHER_CLASS])
+)
+
 _PROPOSAL_TTL_HOURS = "1"
 
 #: Answer for one tool in the batched review.
@@ -305,6 +375,7 @@ def _synthesize_manifest(
     env_by_server: Optional[dict[str, dict[str, str]]] = None,
     credentials_by_server: Optional[dict[str, dict[str, str]]] = None,
     named: Optional[Collection[tuple[str, str]]] = None,
+    hold_on_taint: Sequence[str] = (),
 ) -> dict:
     """Build key #1: the namespace + ToolOp declaration for this project.
 
@@ -334,6 +405,13 @@ def _synthesize_manifest(
     envelope they hash to) as confirmed. A tool the namespace does not name is
     uncallable whatever the store holds for it, which is what lets a wrap name
     each tool only once its admission is ratified (`_admit_committed`).
+
+    Every manifest also declares and grants the reserved coordinates the hook
+    asks about (`HARNESS_TOOL_OPS`), whatever servers were admitted, so the
+    broker can decide a built-in call. `hold_on_taint` is the envelope's
+    `tainted_harness_hold`: the tool classes whose decision is held for approval
+    on a tainted turn. It is always declared, and empty unless `wrap
+    --hold-when-tainted` names a class.
     """
     confirmed = tools_by_server or {}
     environments = env_by_server or {}
@@ -366,13 +444,16 @@ def _synthesize_manifest(
             declaration["tools"] = callable_
         mcp_servers[server.server_id] = declaration
         tool_ops.extend(op.model_dump(mode="json") for _, op in admitted)
+    tool_ops.extend(dict(op) for op in HARNESS_TOOL_OPS)
 
     # The admitted coordinates, as the action classes the gateway will serve.
     # WITHOUT this the wrap produces a manifest that cannot build a runtime at
     # all: `served_registry()` is built from granted classes, so a gateway over a
     # grant-less manifest advertises nothing and denies everything (found
     # by running it). The classes are exactly what the human confirmed in the
-    # review — never the discovered set, which is untrusted input.
+    # review — never the discovered set, which is untrusted input. The
+    # reserved harness coordinates are granted with them: the broker decides a
+    # built-in call there, and an ungranted class is refused.
     grant_classes = sorted(f"{op['tool']}.{op['op']}" for op in tool_ops)
 
     # Credential delivery. One LEAF per server, named for the server
@@ -411,6 +492,10 @@ def _synthesize_manifest(
             # a consumer decision, made here and named as a source id built
             # from codes, never a path (the platform's GATEWAY.md G24).
             "trusted_read_sources": list(TRUSTED_HARNESS_READS),
+            # Declared in every manifest, and empty unless the operator names a
+            # class: on a tainted turn the broker holds a built-in call of a
+            # listed class for approval (PDP rule `tainted_harness_hold`).
+            "tainted_harness_hold": list(hold_on_taint),
         },
         # Every constructible server must also be wired as a connector — the
         # base refuses a construction block nothing wires, because a server the
@@ -1307,8 +1392,18 @@ def _with_home(args: argparse.Namespace, store: TeghStore) -> str:
     return f" --home {_path(store.home)}" if args.home else ""
 
 
+def _held_when_tainted(args: argparse.Namespace) -> tuple[str, ...]:
+    """The classes `--hold-when-tainted` named, each once, in the order first given.
+
+    The base refuses a class listed twice, and naming one twice on a command
+    line asks for nothing more than naming it once.
+    """
+    return tuple(dict.fromkeys(args.hold_when_tainted or ()))
+
+
 def _wrap_again(args: argparse.Namespace, store: TeghStore, project: Path) -> str:
-    """This wrap as a command to run again, with every flag that says WHERE."""
+    """This wrap as a command to run again, with every flag that says WHERE, and
+    the classes held on a tainted turn, which a second wrap would otherwise drop."""
     said = f"tegh wrap {args.harness} --project {_path(project)}"
     if args.harness_home:
         said += f" --harness-home {_path(args.harness_home)}"
@@ -1316,6 +1411,8 @@ def _wrap_again(args: argparse.Namespace, store: TeghStore, project: Path) -> st
         said += " --no-rewrite"
     if args.no_hooks:
         said += " --no-hooks"
+    for tool_class in _held_when_tainted(args):
+        said += f" --hold-when-tainted {tool_class}"
     return said + _with_home(args, store)
 
 
@@ -1675,6 +1772,7 @@ def _prepare_wrap(
             daily_cap=args.daily_cap,
             env_by_server=decisions.env_by_server,
             credentials_by_server=decisions.credentials_by_server,
+            hold_on_taint=_held_when_tainted(args),
         ),
     )
     # From here the manifest is this wrap's, written for a database of this
@@ -1745,6 +1843,7 @@ def _prepare_wrap(
             env_by_server=decisions.env_by_server,
             credentials_by_server=decisions.credentials_by_server,
             named=named,
+            hold_on_taint=_held_when_tainted(args),
         )
 
     # The maker's half of every admission, all of them before any file of the
@@ -1949,7 +2048,8 @@ def _report_wrapped(
     print(f"  gateway   {plan.gateway_site.label} as {plan.gateway_name!r}")
     if plan.hook is not None:
         added = "already there, not added again" if plan.hook.present else "added"
-        print(f"  hook      {plan.hook.site.label} ({hooksite.HOOK_EVENT}, {added})")
+        events = " and ".join(hooksite.HOOK_EVENTS)
+        print(f"  hook      {plan.hook.site.label} ({events}, {added})")
     print(f"  backup    {backup_path}")
     # Named here because this is the moment it starts being written, and because
     # a payoff nothing points at is a payoff nobody finds: every brokered
@@ -1957,17 +2057,20 @@ def _report_wrapped(
     print(f"  audit     {store.audit_path(project)}")
     if plan.hook is not None:
         print(
-            "\n  The agent's built-in tools (shell, file reads and writes, web fetch) "
-            "are\n  OBSERVED, not gated: after each one the harness runs `tegh hook`, "
-            "one short\n  process per call, which reports it to the gateway's tape. A "
-            "read outside this\n  project taints the turn, so the agent's next external "
-            "write through the\n  gateway is held. Nothing stops a built-in call, and a "
-            "hook that fails lets\n  it through unrecorded. Containment is posture 2."
+            "\n  The agent's built-in tools (shell, file reads and writes, web fetch) are"
+            "\n  MEDIATED, not contained. Before each one the harness asks the broker"
+            "\n  through `tegh hook`, and the broker's answer is the only approval the"
+            "\n  call gets from tegh, which writes no allow rules. A refusal or a hold"
+            "\n  carries the broker's own sentence. After the call runs, the hook reports"
+            "\n  it, so the decision and the report pair on the tape, and a permitted"
+            "\n  read outside this project taints the turn. A hook the harness does not"
+            "\n  run leaves the call to the harness's own rules, and nothing here"
+            "\n  contains a built-in call."
         )
     else:
         print(
             "\n  --no-hooks: the agent's built-in tools (shell, file reads and writes, "
-            "web\n  fetch) are neither gated nor observed. Only MCP calls reach the broker."
+            "web\n  fetch) are neither decided nor observed. Only MCP calls reach the broker."
         )
     for source in plan.unwritable:
         print(
@@ -2565,10 +2668,23 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         "--no-hooks",
         action="store_true",
         help=(
-            "do not add the PostToolUse hook that reports the agent's built-in "
-            "tool calls (shell, file, web) to the gateway's tape. Without it "
-            "those calls are neither gated nor observed. With it they are "
-            "observed and still not gated, and each one runs one short process"
+            "do not add the PreToolUse and PostToolUse hooks for the agent's "
+            "built-in tool calls (shell, file, web). Without them those calls "
+            "are neither decided nor observed. With them each one is decided by "
+            "the broker before it runs and reported to the gateway's tape after, "
+            "and is still not contained; each runs one short process per event"
+        ),
+    )
+    wrap.add_argument(
+        "--hold-when-tainted",
+        action="append",
+        choices=HARNESS_TOOL_CLASSES,
+        metavar="CLASS",
+        help=(
+            "hold a built-in call of this class for approval when the turn is "
+            "tainted, as the envelope's tainted_harness_hold. Repeatable; one of "
+            f"{', '.join(HARNESS_TOOL_CLASSES)}. Off unless given. 'shell' is the "
+            "one most consumers want"
         ),
     )
 

@@ -134,7 +134,8 @@ def _assert_posture_audits_the_projects_own_database(harness: dict, capsys) -> N
     """`tegh posture` audited this project's database, and counted one project's rows.
 
     The audit line names the file the base was pointed at, and its counts are
-    one grant and one admitted row per tool. The report as a whole never names
+    one grant and one admitted row per tool, plus one grant per reserved
+    harness coordinate the manifest declares (`cli.HARNESS_TOOL_OPS`). The report as a whole never names
     the database of the earlier layout: for a project this tegh wrapped that
     file is no part of its posture, whether or not the home still holds it.
     """
@@ -146,8 +147,9 @@ def _assert_posture_audits_the_projects_own_database(harness: dict, capsys) -> N
     audited = json.loads(said)["store"]
     assert audited[0]["holds"] == "yes", audited
     assert audited[0]["source"].endswith(f"--sqlite {store.db_path(project)}"), audited
+    grants = TOY_TOOL_COUNT + len(cli.HARNESS_TOOL_OPS)
     assert (
-        f"over {TOY_TOOL_COUNT} grant(s), 0 registry violation(s) over "
+        f"over {grants} grant(s), 0 registry violation(s) over "
         f"{TOY_TOOL_COUNT} admitted-tool row(s)"
     ) in audited[0]["claim"], audited
     assert str(store.shared_db_path) not in said, said

@@ -51,6 +51,8 @@ import yaml
 
 pytest.importorskip("mcp", reason="a real wrap snapshots a real MCP server")
 
+from safe_agents.broker.schemas.harness_tool import HARNESS_TOOL  # noqa: E402
+
 from tegh import cli, interpose, transaction, unwrap  # noqa: E402
 from tegh.cli import _parse_args, main, wrap_command  # noqa: E402
 from tegh.lockfile import lock_paths  # noqa: E402
@@ -348,7 +350,11 @@ def _manifest_out_of_order(scene: _Scene, written: str) -> list[str]:
         store_of(scene.harness).manifest_path(scene.harness["project"]).read_text(encoding="utf-8")
     )
     wrong = []
-    classified = sorted(f"{op['tool']}/{op['op']}" for op in manifest["tool_ops"])
+    # The reserved harness coordinates are declared on every pass
+    # (`HARNESS_TOOL_OPS`), so only the MCP tools' classifications tell them apart.
+    classified = sorted(
+        f"{op['tool']}/{op['op']}" for op in manifest["tool_ops"] if op["tool"] != HARNESS_TOOL
+    )
     if classified != ["ledger/get_entry", "ledger/list_entries"]:
         wrong.append(
             f"{written} before the manifest that carries the confirmed "

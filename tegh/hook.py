@@ -53,8 +53,8 @@ semantics"). A failure this process never gets to answer, such as a timeout
 the harness enforces or a launcher that cannot start, would by the harness's
 default let the call proceed. The wrap's `PreToolUse` entry carries
 `"onFailure": "block"` for those (`hooksite.py`), which refuses the call on any
-hook failure, a timeout included, in Claude Code 2.1.295 and later (in its
-changelog and not yet on its hooks page; observed 2026-10-09 and 2026-10-12).
+hook failure, a timeout included, in Claude Code 2.1.295 and later (documented
+on its hooks page for those versions; observed 2026-10-09 and 2026-10-12).
 
 One input is not answered that way: hook input that is not a JSON object
 cannot be told apart from a `PostToolUse` event, so it is handled as one (exit
