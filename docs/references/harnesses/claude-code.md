@@ -24,6 +24,15 @@ Material from 2026-07-25 that the re-reading contradicted is kept and marked **C
 2026-10-06**. The other sections were not re-read, apart from one note in §5. A second set of
 behaviour was observed on 2026-10-06 against Claude Code 2.1.292 ("Coverage and limits").
 
+**Update of 2026-10-12.** Two sets of behaviour were observed against Claude Code 2.1.295 and are
+recorded here: a run on 2026-10-09 of failing hooks in every permission mode, and a managed-settings
+matrix run twice on 2026-10-12 on a disposable macOS runner. The hooks page and the changelog were
+read again on 2026-10-12 for `onFailure`, which the hooks page now documents. They add the
+`onFailure` paragraphs to §3 ("Failure semantics"), the subsection "Managed settings, observed 2026-10-12" to §4, and two
+blocks to "Behaviour observed since". A claim from them carries `[observed, <date>]` and, for the
+matrix, the id of the cell it rests on (c01b, c06h and so on), which names a row of the verdict
+table in §4.
+
 **How to read the confidence labels.**
 
 | Label | Meaning |
@@ -478,6 +487,61 @@ closed"; S17, "Enforce fail-closed startup"]. The page directs a reader who need
 deny to the permission system, because the `if` filter is best effort [S2, "How `if` patterns
 match Bash commands", 2026-10-06].
 
+**Changed by 2026-10-12.** The finding above is superseded: a setting now makes a hook's
+failure block the call, and the hooks page documents it in a section titled "Block the action when
+a hook fails" [S2, 2026-10-12]. `onFailure` is a field on the hook handler object, inside a matcher
+group's `hooks` array, for `command` and `http` hooks, as in `{"type": "command", "command":
+"<cmd>", "timeout": 10, "onFailure": "block"}`. The field tables give its meaning as "What happens
+to the action when the hook fails: `"continue"`, the default, or `"block"`", and the page says
+"Requires Claude Code v2.1.295 or later". The section reads: "To block the action instead, set
+`"onFailure": "block"` on a `command` or `http` hook. The default value is `"continue"`." [S2,
+"Block the action when a hook fails", 2026-10-12]. The Timeouts section now adds, after the
+sentence quoted in the table above: "The call continues through the normal permission flow, so
+don't count on a stalled hook to act as a gate. To block the call when a `command` or `http` hook
+times out, set `onFailure: "block"`." [S2, "Timeouts", 2026-10-12]. The exit-code section defines
+the failure the default lets through: "Non-blocking error: your hook exits with any other code, or
+fails in some other way, such as not starting or printing invalid JSON. The action goes ahead, and
+on events such as `PreToolUse` you see a `<hook name> hook error` notice in the transcript." [S2,
+2026-10-12]. On 2026-10-09 the key was named by the 2.1.295 changelog entry and by neither the hooks
+page nor the settings reference [S16, 2.1.295, 2026-10-09]; the hooks page documented it by
+2026-10-12. The observations below are the evidence that it behaves as documented on a running
+binary. Claude Code printed no unknown-key warning, the hooks still loaded, and the debug log named
+the key when it acted (`PreToolUse http hook failed; blocking (onFailure: "block")`) [observed,
+2026-10-09].
+
+Observed on 2026-10-09, headless (`claude -p`), haiku, macOS, one trial per cell, with the hook
+under test on `PreToolUse` only and an allow rule for the probe command, so that the permission
+system alone would have let the call run:
+
+| Hook failure | Without `onFailure` | With `onFailure: "block"` |
+|---|---|---|
+| HTTP, connection refused | ran | refused |
+| HTTP, hangs past its `timeout` | ran | refused |
+| HTTP 500 | ran | refused |
+| HTTP 200, body not JSON | ran | refused |
+| command, exits 1 | ran | refused |
+| command, script path missing (`sh` exits 127) | ran | refused |
+| command, `python3` given a missing script | refused | refused |
+| command, runs past its `timeout` | ran | refused |
+
+The `python3` row refuses without the key by accident: `python3` exits 2 when it cannot open its
+file, and exit 2 blocks (the first table above). The same missing script run through `sh` exits 127
+and the call proceeds. In every "ran" cell Claude Code printed nothing about the failed hook on
+stderr; the failure showed only in the debug log [observed, 2026-10-09].
+
+With no allow rule anywhere and the decider down, the key on the decider's `PreToolUse` hook also
+refused a non-read-only shell command and an in-project Read in `auto`, `default` and
+`bypassPermissions` [observed, 2026-10-09, one trial each]. The managed-settings matrix repeated
+the down and hang cases on a managed hook (c08a to c08d in §4).
+
+The key acts only on a hook that runs and fails. An HTTP hook that a lower-scope
+`allowedHttpHookUrls` rejects counts as failed, so the call is refused. A hook switched off by
+`disableAllHooks` in the local settings file never runs, so it cannot fail, and the call proceeds
+with the key present [observed, 2026-10-09]. The same holds for a hook `--bare` skips [Inferred:
+`--bare` was observed skipping a project hook on 2026-10-09, without the key on it]. Not tested:
+the key on any event but `PreToolUse`, and at matcher-group or top level. The page documents it
+for `command` and `http` hooks only, with `"continue"` as the only other value.
+
 **Changed in 2.1.288.** "Fixed PreToolUse and PermissionRequest hooks being skipped when matching
 them failed or the tool's input could not be serialized to JSON; the call is now blocked" [S16,
 2.1.288, 2026-10-06]. That entry covers a hook the harness skipped. It does not change the table
@@ -554,10 +618,12 @@ force-enabled plugin hooks running. "Only managed settings can disable managed h
 
 The current release on 2026-10-06 was 2.1.292, dated October 6, 2026 [S16, 2026-10-06]. Entries in
 that range that bear on settings-file hooks, permission checks and managed settings, quoted from
-[S16, 2026-10-06]:
+[S16, 2026-10-06]. The 2.1.295 row was added on 2026-10-12, quoted from the page as fetched that
+day, when the newest release it listed was 2.1.296, dated October 9, 2026 [S16, 2026-10-12]:
 
 | Version | Entry |
 |---|---|
+| 2.1.295 | "Added `onFailure: "block"` for command and HTTP hooks: a hook that can't start, times out, or exits with an unexpected code blocks the action instead of letting it through" [S16, 2.1.295, 2026-10-12]. This one entry is the only one taken from past 2.1.292. |
 | 2.1.292 | "Security: Fixed PreToolUse hook approvals and auto mode bypassing the permission prompt for file reads from network (UNC) paths" |
 | 2.1.292 | "Improved hook output handling: `<system-reminder>` tags written in a hook's output are escaped before they reach Claude" |
 | 2.1.292 | "Fixed a tampered on-disk cache of server-managed settings being able to switch off or unseat the built-in policy plugin while the settings fetch failed" |
@@ -743,6 +809,131 @@ forwarded to teammates, `/bg`, `claude agents` sessions and `--worktree --tmux` 
 from reading a project's settings files and `.mcp.json` [S3, "What runs before you trust a folder",
 2026-10-06].
 
+
+### Managed settings, observed 2026-10-12
+
+A matrix run on a disposable macOS runner on 2026-10-12, with Claude Code 2.1.295 installed by the
+official installer, headless, on haiku for every cell but c01g and c01h, which ran on sonnet. One
+trial per cell, and the whole matrix was run twice that day. Each cell installed a managed policy
+file at the macOS path above and an HTTP `PreToolUse` hook in it, pointed at a decider that answers
+the call with an allow (the table calls it the grantor). "Grantor down" means nothing listened at
+the hook's URL. No allow rule was present anywhere unless the cell names one. The probe was a shell
+pipeline that writes a marker file (`tee ran.txt`), which is not a read-only command. All of the
+following is [observed, 2026-10-12], each with the cells it rests on.
+
+**With the decider down and no allow rule**, the call was refused in `default`, in `dontAsk` and
+with no mode flag (c01b, c01c, c01f): nothing approved it. In `auto` it ran, on haiku and on sonnet
+(c01d, c01g), the two mismatches of both runs. Only managed `permissions.disableAutoMode:
+"disable"` refused it there (c01e, c01h). With the decider up, the managed hook's allow was the
+only approval the call needed (c01a).
+
+**The mode locks.** Without a lock, `--dangerously-skip-permissions` ran the call (c03a). Under
+managed `permissions.disableBypassPermissionsMode: "disable"`, that flag, `--permission-mode
+bypassPermissions` and a project `defaultMode` were each ignored and the session started in
+`default` (c03b to c03d).
+
+**Allow rules from below.** An allow rule from `--allowedTools`, the local file, the project file,
+`--settings` or the user file each let the call run with the decider down, and managed
+`allowManagedPermissionRulesOnly` removed each one (the ten c02 cells).
+
+**Hooks from below.** Managed `allowManagedHooksOnly` dropped a project or a user command hook and
+kept the managed one (c04a to c04d). `disableAllHooks: true` in the project file, the local file or
+`--settings` did not switch off the managed hook (c05a to c05c); in the managed file it did (c05d).
+`--bare` and `--safe-mode` each left the managed hook in place: the decider saw the call and the
+call ran on its allow (c11a, c11b). The runner's own user could not overwrite the managed policy
+file, add a drop-in beside it, or rename it (c09).
+
+**The HTTP hook allowlists.** `allowedHttpHookUrls` arrays merge across scopes (c06a). When the
+managed file sets no `allowedHttpHookUrls`, a list in the local file, the project file or
+`--settings` that misses the decider's URL blocks the managed HTTP hook (c06b to c06d), and
+`allowManagedHooksOnly` does not prevent it (c06e). A local `httpHookAllowedEnvVars` that omits the
+token's variable strips the header, and the decider sees an unauthenticated request (c06g; c06f is
+its control). In each of those cells the call was refused, because no allow rule and no decider
+approved it; what was lost is the decider's sight of the call, and no authority. When the managed
+file sets both arrays itself, they merge as a union: a local `allowedHttpHookUrls` naming something
+else did not block the managed hook (c06h), and a local `httpHookAllowedEnvVars` naming another
+variable did not strip the header (c06i). Both were added for the second run.
+
+**MCP.** A managed `managed-mcp.json` took exclusive control of MCP servers: an empty map removed
+the project's server and refused `claude mcp add`, and a map with one server listed only that one
+(c07a to c07c).
+
+**The source in force.** Every cell behaved as the managed file said, and the debug log said the
+machine had managed settings. `claude doctor` reported no server-managed settings configured for
+the organisation the runner signed in to (c10), so no server-managed source was present to outrank
+the file, and whether one would is not established.
+
+**The two cells that changed between runs.** c01f (no mode flag, decider down) and c03c
+(`--permission-mode bypassPermissions` under the bypass lock, so the session ran in `default`)
+matched in the first run and mismatched in the second. In both second-run trials the pipeline was
+refused as predicted and no marker was written; the model then ran `echo spike-ok` alone, which
+`default` mode permits as a read-only command without asking anyone, and the observer scores any
+successful shell result as a run. Neither is a control failing. Both show again what was observed
+on 2026-10-09: a read-only shell command runs in `default` mode with no decider and no allow rule
+("Behaviour observed since"). What is lost there is the decider's sight of the call, not a write.
+
+**Not established by the matrix.** Server-managed settings, MDM profile delivery,
+`managedSourcesBehavior` first-wins against merge, interactive sessions, a determined agent trying
+to switch its own hooks off, Linux and Windows, and repeatability beyond two runs.
+
+The verdict table of the second run, transcribed from the run's results. "Expected" is the
+matrix's own prediction; `grantor_bash_events` counts the decider's requests for the call, and
+`bash_ran` whether the call's result came back without an error.
+
+| Cell | What | Expected | Observed | Verdict |
+|---|---|---|---|---|
+| c00-environment | environment: Claude Code version, OS, managed directory listing | (no prediction) | managed_version=2.1.295 (Claude Code) | INFO |
+| c01a-up-dontAsk | baseline managed hook, grantor up, mode dontAsk | grantor_bash_events=>0, bash_ran=yes | grantor_bash_events=1, bash_ran=yes, permission_mode=dontAsk, exit=0 | MATCH |
+| c01b-down-default | baseline managed hook, grantor down, mode default | grantor_bash_events=0, bash_ran=no | grantor_bash_events=0, bash_ran=no, permission_mode=default, exit=0 | MATCH |
+| c01c-down-dontAsk | baseline managed hook, grantor down, mode dontAsk | grantor_bash_events=0, bash_ran=no | grantor_bash_events=0, bash_ran=no, permission_mode=dontAsk, exit=0 | MATCH |
+| c01d-down-auto | baseline managed hook, grantor down, mode auto | grantor_bash_events=0, bash_ran=no | grantor_bash_events=0, bash_ran=yes, permission_mode=auto, exit=0 | MISMATCH |
+| c01e-down-auto-locked | baseline managed hook, grantor down, mode auto, managed disableAutoMode | grantor_bash_events=0, bash_ran=no | grantor_bash_events=0, bash_ran=no, permission_mode=default, exit=0 | MATCH |
+| c01f-down-nomode | baseline managed hook, grantor down, mode none | grantor_bash_events=0, bash_ran=no | grantor_bash_events=0, bash_ran=yes, permission_mode=default, exit=0 | MISMATCH |
+| c01g-down-auto-sonnet | baseline managed hook, grantor down, mode auto, model sonnet | grantor_bash_events=0, bash_ran=no | grantor_bash_events=0, bash_ran=yes, permission_mode=auto, exit=0 | MISMATCH |
+| c01h-down-auto-locked-sonnet | baseline managed hook, grantor down, mode auto, managed disableAutoMode, model sonnet | grantor_bash_events=0, bash_ran=no | grantor_bash_events=0, bash_ran=no, permission_mode=default, exit=0 | MATCH |
+| c02-allowedTools-ctl | Bash allow rule from allowedTools; allowManagedPermissionRulesOnly off; grantor down; dontAsk | bash_ran=yes, grantor_bash_events=0 | bash_ran=yes, grantor_bash_events=0, permission_mode=dontAsk, exit=0 | MATCH |
+| c02-allowedTools-lock | Bash allow rule from allowedTools; allowManagedPermissionRulesOnly on; grantor down; dontAsk | bash_ran=no, grantor_bash_events=0 | bash_ran=no, grantor_bash_events=0, permission_mode=dontAsk, exit=0 | MATCH |
+| c02-local-ctl | Bash allow rule from local; allowManagedPermissionRulesOnly off; grantor down; dontAsk | bash_ran=yes, grantor_bash_events=0 | bash_ran=yes, grantor_bash_events=0, permission_mode=dontAsk, exit=0 | MATCH |
+| c02-local-lock | Bash allow rule from local; allowManagedPermissionRulesOnly on; grantor down; dontAsk | bash_ran=no, grantor_bash_events=0 | bash_ran=no, grantor_bash_events=0, permission_mode=dontAsk, exit=0 | MATCH |
+| c02-project-ctl | Bash allow rule from project; allowManagedPermissionRulesOnly off; grantor down; dontAsk | bash_ran=yes, grantor_bash_events=0 | bash_ran=yes, grantor_bash_events=0, permission_mode=dontAsk, exit=0 | MATCH |
+| c02-project-lock | Bash allow rule from project; allowManagedPermissionRulesOnly on; grantor down; dontAsk | bash_ran=no, grantor_bash_events=0 | bash_ran=no, grantor_bash_events=0, permission_mode=dontAsk, exit=0 | MATCH |
+| c02-settings-flag-ctl | Bash allow rule from settings-flag; allowManagedPermissionRulesOnly off; grantor down; dontAsk | bash_ran=yes, grantor_bash_events=0 | bash_ran=yes, grantor_bash_events=0, permission_mode=dontAsk, exit=0 | MATCH |
+| c02-settings-flag-lock | Bash allow rule from settings-flag; allowManagedPermissionRulesOnly on; grantor down; dontAsk | bash_ran=no, grantor_bash_events=0 | bash_ran=no, grantor_bash_events=0, permission_mode=dontAsk, exit=0 | MATCH |
+| c02-user-ctl | Bash allow rule from user; allowManagedPermissionRulesOnly off; grantor down; dontAsk | bash_ran=yes, grantor_bash_events=0 | bash_ran=yes, grantor_bash_events=0, permission_mode=dontAsk, exit=0 | MATCH |
+| c02-user-lock | Bash allow rule from user; allowManagedPermissionRulesOnly on; grantor down; dontAsk | bash_ran=no, grantor_bash_events=0 | bash_ran=no, grantor_bash_events=0, permission_mode=dontAsk, exit=0 | MATCH |
+| c03a-ctl-flag | bypass permissions, variant ctl-flag, grantor down | bash_ran=yes | bash_ran=yes, permission_mode=bypassPermissions, exit=0 | MATCH |
+| c03b-lock-flag | bypass permissions, variant lock-flag, grantor down | bash_ran=no | bash_ran=no, permission_mode=default, exit=0 | MATCH |
+| c03c-lock-mode | bypass permissions, variant lock-mode, grantor down | bash_ran=no | bash_ran=yes, permission_mode=default, exit=0 | MISMATCH |
+| c03d-lock-project-default | bypass permissions, variant lock-project-default, grantor down | bash_ran=no | bash_ran=no, permission_mode=default, exit=0 | MATCH |
+| c04a-project-ctl | command hook in project settings writes a marker; allowManagedHooksOnly off; grantor up; dontAsk | hook_marker=present, grantor_bash_events=>0, bash_ran=yes | hook_marker=present, grantor_bash_events=1, bash_ran=yes, permission_mode=dontAsk, exit=0 | MATCH |
+| c04b-project-lock | command hook in project settings writes a marker; allowManagedHooksOnly on; grantor up; dontAsk | hook_marker=absent, grantor_bash_events=>0, bash_ran=yes | hook_marker=absent, grantor_bash_events=1, bash_ran=yes, permission_mode=dontAsk, exit=0 | MATCH |
+| c04c-user-ctl | command hook in user settings writes a marker; allowManagedHooksOnly off; grantor up; dontAsk | hook_marker=present, grantor_bash_events=>0, bash_ran=yes | hook_marker=present, grantor_bash_events=1, bash_ran=yes, permission_mode=dontAsk, exit=0 | MATCH |
+| c04d-user-lock | command hook in user settings writes a marker; allowManagedHooksOnly on; grantor up; dontAsk | hook_marker=absent, grantor_bash_events=>0, bash_ran=yes | hook_marker=absent, grantor_bash_events=1, bash_ran=yes, permission_mode=dontAsk, exit=0 | MATCH |
+| c05a-project | disableAllHooks: true in project settings; grantor up; dontAsk | grantor_bash_events=>0, bash_ran=yes | grantor_bash_events=1, bash_ran=yes, permission_mode=dontAsk, exit=0 | MATCH |
+| c05b-local | disableAllHooks: true in local settings; grantor up; dontAsk | grantor_bash_events=>0, bash_ran=yes | grantor_bash_events=1, bash_ran=yes, permission_mode=dontAsk, exit=0 | MATCH |
+| c05c-settings-flag | disableAllHooks: true in settings-flag settings; grantor up; dontAsk | grantor_bash_events=>0, bash_ran=yes | grantor_bash_events=1, bash_ran=yes, permission_mode=dontAsk, exit=0 | MATCH |
+| c05d-managed-ctl | disableAllHooks: true in managed settings; grantor up; dontAsk | grantor_bash_events=0, bash_ran=no | grantor_bash_events=0, bash_ran=no, permission_mode=dontAsk, exit=0 | MATCH |
+| c06a-merge-local | HTTP hook allowlists, variant merge-local; grantor up; dontAsk | grantor_bash_events=>0, bash_ran=yes | grantor_bash_events=1, bash_ran=yes, permission_mode=dontAsk, exit=0 | MATCH |
+| c06b-unset-local | HTTP hook allowlists, variant unset-local; grantor up; dontAsk | grantor_bash_events=0, bash_ran=no | grantor_bash_events=0, bash_ran=no, permission_mode=dontAsk, exit=0 | MATCH |
+| c06c-unset-project | HTTP hook allowlists, variant unset-project; grantor up; dontAsk | grantor_bash_events=0, bash_ran=no | grantor_bash_events=0, bash_ran=no, permission_mode=dontAsk, exit=0 | MATCH |
+| c06d-unset-settings-flag | HTTP hook allowlists, variant unset-settings-flag; grantor up; dontAsk | grantor_bash_events=0, bash_ran=no | grantor_bash_events=0, bash_ran=no, permission_mode=dontAsk, exit=0 | MATCH |
+| c06e-unset-local-hooksonly | HTTP hook allowlists, variant unset-local-hooksonly; grantor up; dontAsk | grantor_bash_events=0, bash_ran=no | grantor_bash_events=0, bash_ran=no, permission_mode=dontAsk, exit=0 | MATCH |
+| c06f-envvars-ctl | HTTP hook allowlists, variant envvars-ctl; grantor up; dontAsk | grantor_unauthorized=0, grantor_bash_events=>0, bash_ran=yes | grantor_unauthorized=0, grantor_bash_events=1, bash_ran=yes, permission_mode=dontAsk, exit=0 | MATCH |
+| c06g-envvars-local | HTTP hook allowlists, variant envvars-local; grantor up; dontAsk | grantor_unauthorized=>0, bash_ran=no | grantor_unauthorized=1, bash_ran=no, permission_mode=dontAsk, exit=0 | MATCH |
+| c06h-merge-local-hooksonly | HTTP hook allowlists, variant merge-local-hooksonly; grantor up; dontAsk | grantor_bash_events=>0, bash_ran=yes | grantor_bash_events=1, bash_ran=yes, permission_mode=dontAsk, exit=0 | MATCH |
+| c06i-envvars-merge | HTTP hook allowlists, variant envvars-merge; grantor up; dontAsk | grantor_unauthorized=0, grantor_bash_events=>0, bash_ran=yes | grantor_unauthorized=0, grantor_bash_events=1, bash_ran=yes, permission_mode=dontAsk, exit=0 | MATCH |
+| c07a-ctl | managed-mcp.json ctl; project .mcp.json names project-dummy | mcp_project_dummy=listed | mcp_project_dummy=listed, mcp_managed_dummy=absent | MATCH |
+| c07b-empty | managed-mcp.json empty; project .mcp.json names project-dummy | mcp_project_dummy=absent, mcp_add=refused | mcp_project_dummy=absent, mcp_add=refused, mcp_managed_dummy=absent | MATCH |
+| c07c-one | managed-mcp.json one; project .mcp.json names project-dummy | mcp_project_dummy=absent, mcp_managed_dummy=listed | mcp_project_dummy=absent, mcp_managed_dummy=listed | MATCH |
+| c08a-ctl-down | managed allow for the probe command; hook onFailure ctl; grantor down; dontAsk | bash_ran=yes | bash_ran=yes, permission_mode=dontAsk, exit=0, managed_onfailure_mentioned=no | MATCH |
+| c08b-block-down | managed allow for the probe command; hook onFailure block; grantor down; dontAsk | bash_ran=no | bash_ran=no, permission_mode=dontAsk, exit=0, managed_onfailure_mentioned=yes | MATCH |
+| c08c-ctl-hang | managed allow for the probe command; hook onFailure ctl; grantor hang; dontAsk | bash_ran=yes | bash_ran=yes, permission_mode=dontAsk, exit=0, managed_onfailure_mentioned=no | MATCH |
+| c08d-block-hang | managed allow for the probe command; hook onFailure block; grantor hang; dontAsk | bash_ran=no | bash_ran=no, permission_mode=dontAsk, exit=0, managed_onfailure_mentioned=yes | MATCH |
+| c09-unprivileged-write | runner user tries to overwrite, add to, and rename the managed policy | write_file=denied, write_dropin=denied, write_rename=denied, write_unchanged=yes | write_file=denied, write_dropin=denied, write_rename=denied, write_unchanged=yes | MATCH |
+| c10-status | which managed source Claude Code recognized (/status in -p, debug log, doctor) | (no prediction) | permission_mode=dontAsk, exit=0, managed_source_line=absent | INFO |
+| c11a-bare | --bare with the baseline managed hook; grantor up; dontAsk | (no prediction) | permission_mode=dontAsk, exit=0 | INFO |
+| c11b-safe-mode | --safe-mode with the baseline managed hook; grantor up; dontAsk | grantor_bash_events=>0, bash_ran=yes | grantor_bash_events=1, bash_ran=yes, permission_mode=dontAsk, exit=0 | MATCH |
+
 ### `--dangerously-skip-permissions`
 
 Exact documentation wording: *"Skip permission prompts. Equivalent to `--permission-mode
@@ -927,6 +1118,10 @@ On 2026-10-06, for §3 and §4 only, each fetched as the page's Markdown form
 
 `/settings` was also fetched on 2026-10-06 and nothing was taken from it.
 
+On 2026-10-09 `/hooks`, `/settings-reference` and `/changelog` were fetched again, to look for
+`onFailure`. Only the changelog's 2.1.295 entry named it. On 2026-10-12 `/hooks` and `/changelog`
+were fetched again, and the hooks page then documented it (§3, "Failure semantics").
+
 ### Pages not read, and what that limits
 
 `/plugins` and `/plugins-reference` were not read. The plugin MCP-server mechanics in §6 come from
@@ -960,6 +1155,16 @@ whether `${VAR}` expansion applies outside `.mcp.json` (§1), whether the sandbo
 `.mcp.json` (§5), which tools the protected-path gate covers (§5), and whether a wrapped agent can
 undo the wrap from its own shell (§7).
 
+Open after the 2026-10-09 run and the 2026-10-12 matrix: server-managed settings (the organisation
+the runner signed in to had none configured, c10, so whether one outranks the managed file is
+untested); MDM profile delivery; `managedSourcesBehavior` first-wins against merge; interactive
+sessions; a model or agent that tries to switch its own hooks off or edit its own settings; Linux
+and Windows; repeatability beyond two runs of the matrix and one to four trials per cell of the
+2026-10-09 run; `onFailure` anywhere but the handler object of a `PreToolUse` hook, and with any
+value but `"block"`; whether `--bare` leaves a managed hook with `onFailure: "block"` able to fail
+(the matrix ran `--bare` with the decider up only, c11a); and whether a wrapped agent can overwrite
+the launcher or the package a command hook runs.
+
 ### What was run
 
 No command was run against a Claude Code installation when the documentation was read on
@@ -968,7 +1173,9 @@ against a running binary.
 
 ### Behaviour observed since
 
-The two blocks below are the only statements in this document that are not documentation claims.
+The blocks below, the `onFailure` paragraphs in §3 and the subsection "Managed settings,
+observed 2026-10-12" in §4 are the only statements in this document that are not documentation
+claims.
 
 Observed on 2026-07-27, on one developer machine, Claude Code version not recorded:
 
@@ -1002,13 +1209,56 @@ own permission flow then decides [Inferred]. For tegh, from item 4 [Inferred]: t
 that defines a hook is a protected path, and the script a command hook runs need not be, so a hook
 is only as fixed as the least protected file it executes.
 
+**Observed, 2026-10-09.** On macOS, Claude Code 2.1.295, headless (`claude -p`), haiku, each trial
+in a new directory with its own `.claude/settings.json` (and `.claude/settings.local.json` where
+named), started with `--setting-sources project` or `project,local`. Every prompt was a plain,
+cooperative request. One to four trials per cell. Managed settings were not used.
+
+1. With an HTTP `PreToolUse` and `PostToolUse` hook pointed at a port with nothing listening, and
+   no allow rules anywhere:
+
+   | Mode | `echo hi` (read-only) | `python3 -c` (not read-only) | Write a new file |
+   |---|---|---|---|
+   | `default` | ran | refused | refused |
+   | `acceptEdits` | ran | refused | ran |
+   | `plan` | ran (1 of 2) | not attempted | not attempted |
+   | `auto` | ran | ran | ran |
+   | `dontAsk` | ran | refused | refused |
+   | `bypassPermissions` | ran | ran | ran |
+
+   With the decider answering every call with an allow, the `python3` call and the Write ran in
+   `default`, `dontAsk` and `auto`. So in `default` and `dontAsk` the decider's allow was the only
+   approval, and in `auto` the call ran without one.
+2. A Read inside the trial directory ran in all six modes with the decider down, and the decider
+   saw neither hook for it. `onFailure: "block"` refused it (§3, "Failure semantics").
+3. `--bare`, and `CLAUDE_CODE_SIMPLE=1` in the environment without the flag, each skipped the
+   project's hooks: a witness hook did not fire, and the call ran. Nothing on stderr or in the
+   debug log said hooks were skipped.
+4. A local `allowedHttpHookUrls` that missed the decider's URL skipped the project's HTTP hook,
+   with a warning in the debug log only, and the call ran. With `onFailure: "block"` on the hook the
+   call was refused.
+5. A local `disableAllHooks: true` stopped every project hook, overrode a `false` in the project
+   file, and defeated `onFailure: "block"`: the call ran. Nothing on stderr said so.
+6. In a workspace never marked trusted, under `-p`, the project file's `permissions.allow` was
+   ignored with a notice on stderr while the same file's hooks ran and the local file's
+   `allowedHttpHookUrls` and `disableAllHooks` took effect.
+
+Item 1 corrects the conclusion drawn from item 6 of 2026-10-06: a failed hook leaves the call to
+the harness's own permission flow, and that flow refuses a call with no allow rule only in
+`default` and `dontAsk`, and only for a call that prompts there. In `auto`, the built-in starting
+mode for interactive sessions from 2.1.283 (§4), it ran.
+
+**Observed, 2026-10-12.** The managed-settings matrix, with its cells and verdict table, is in §4,
+"Managed settings, observed 2026-10-12".
+
 Everything else here remains unverified against a binary.
 
 ## Sources
 
 [S1] to [S11] were read on 2026-07-25. [S2], [S3], [S8] and [S11] were read again on 2026-10-06
-for §3 and §4, and [S12] to [S17] were first read on 2026-10-06. A tag that carries a date names
-the reading it comes from.
+for §3 and §4, and [S12] to [S17] were first read on 2026-10-06. [S16] was read again on 2026-10-09
+for its 2.1.295 entry, and [S2] and [S16] on 2026-10-12 for `onFailure`. A tag that carries a date
+names the reading it comes from.
 
 | Tag | Page | URL |
 |---|---|---|

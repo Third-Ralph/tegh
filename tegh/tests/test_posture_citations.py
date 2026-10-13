@@ -60,6 +60,7 @@ from tegh.cluster import (
 from tegh.harnesses import durability_line
 from tegh.lock import Harness
 from tegh.posture import (
+    HookReading,
     PostureLine,
     Routing,
     _invariant_gaps,
@@ -181,6 +182,11 @@ class _NoManifest:
 
 _NO_MANIFEST = _NoManifest()
 
+#: Every reading of a project's hook entries, so each built-ins line is read.
+_HOOK_READINGS = tuple(
+    HookReading(pre, post) for pre in (True, False) for post in (True, False)
+) + (HookReading(None, None),)
+
 #: One of each state `_routing` can report, so every branch's citations are read.
 _ROUTINGS = (
     Routing("interposed"),
@@ -193,6 +199,9 @@ _ROUTINGS = (
 def _static_lines() -> list[PostureLine]:
     """Every line built from literals, across EVERY routing state.
 
+    The built-ins line is built for every hook reading too, for the reason the
+    routing states are: a default report renders only one of them.
+
     Deduplicated, because the states share every gap but the first one:
     without this a stale citation is reported once per state, and a failure
     message that says everything twice is one people learn to skim.
@@ -204,7 +213,8 @@ def _static_lines() -> list[PostureLine]:
     lines = [*_invariant_holds()]
     for routing in _ROUTINGS:
         lines.append(_rung_reason(routing))
-        lines.extend(_invariant_gaps(routing))
+        for hooks in _HOOK_READINGS:
+            lines.extend(_invariant_gaps(routing, hooks))
     lines.extend(_polarity_lines(Path("/nonexistent/project"), _NO_MANIFEST))
     lines.append(durability_line(Harness.CLAUDE_CODE))
     lines.append(durability_line("some-future-harness"))

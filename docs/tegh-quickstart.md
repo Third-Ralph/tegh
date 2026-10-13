@@ -235,11 +235,11 @@ Restore with: tegh unwrap --project /Users/you/tegh-demo
 
 The harness config now names one server, `tegh`, and the memory server is reached only through it.
 
-The wrap also adds one hook to `.claude/settings.local.json` in the project, creating the file if
-there is none: a `PostToolUse` entry that runs `tegh hook` after each of Claude Code's own tool
-calls (§5 says what it does). The sample above was captured before tegh added it. A wrap now also
-prints a `hook` line under `gateway`, naming that file, and a paragraph saying the built-in tools are
-observed and not gated. `tegh wrap --no-hooks` leaves the hook out. The file is the project's local
+The wrap also adds two hook entries to `.claude/settings.local.json` in the project, creating the
+file if there is none: a `PreToolUse` entry that runs `tegh hook` before each of Claude Code's own
+tool calls and a `PostToolUse` entry that runs it after (§5 says what they do). The sample above was
+captured before tegh added them. A wrap now also prints a `hook` line under `gateway`, naming that
+file, and a paragraph about the built-in tools. `tegh wrap --no-hooks` leaves the hooks out. The file is the project's local
 settings, which Claude Code's documentation describes as gitignored. tegh does not edit
 `.gitignore`, so if your repository does not ignore that file, `git status` shows it.
 
@@ -313,24 +313,38 @@ The broker has two grounds for holding it, and the audit tape (§7) names the on
   turn, which is the `tegh call` below. This one comes from the classification you set in §4, not
   from anything the agent or the server said at call time.
 
-Claude Code's own tools count too, but only as observations. After each built-in call (Read, Bash,
-Write, Edit, WebFetch, WebSearch and the rest) the hook the wrap installed runs `tegh hook`, which
-reports the call to the gateway: what kind of tool it was, whether its subject was in the project,
-under your home directory, elsewhere or remote, and digests of the subject and the result. The
-path, URL or command itself never leaves the hook. The tape records each report as
-`abstain`/`observed` under the tool `harness-tool`. A Read of a file outside the project, a
-WebFetch or a WebSearch taints the turn the way an MCP read does, so the next external write is held
-as a `tainted external write`. A Read inside the project is recorded and does not taint: the wrap's
-manifest trusts `harness:claude-code/file-read/project`, because the project is the code the agent
-was asked to work on. A Bash command that reads a file is recorded as `shell` and taints nothing.
+Claude Code's own tools go to the broker too, through the two hooks the wrap installed. Before
+each built-in call (Read, Bash, Write, Edit, WebFetch, WebSearch and the rest) Claude Code runs
+`tegh hook`, which asks the gateway for a decision: what kind of tool it is, whether its subject is
+in the project, under your home directory, elsewhere or remote, and digests of the subject and of
+the full input. The path, URL or command itself never leaves the hook. tegh writes no allow rule
+into Claude Code's settings, so the broker's answer is the only approval the call gets from tegh's
+side. A refusal or a hold reaches the agent as the broker's own sentence, and a held call is
+released with `tegh approve`, as an MCP call is. After the call, the same command reports it with a
+digest of the result, and the tape pairs the report with the decision, both under the tool
+`harness-tool`. A Read of a file outside the project, a WebFetch or a WebSearch taints the turn the
+way an MCP read does, so the next external write is held as a `tainted external write`. A Read
+inside the project does not taint: the wrap's manifest trusts
+`harness:claude-code/file-read/project`, because the project is the code the agent was asked to
+work on. A Bash command that reads a file is classed `shell` and taints nothing.
 
-None of this gates a built-in call. The hook runs after the call has happened, nothing it does can
-stop or undo one, and a hook that fails, times out or is removed lets the call through unrecorded,
-which is how Claude Code treats every hook failure. Each built-in call now also runs one short
-process. A project wrapped before tegh added the hook has neither the hook nor that trusted read
-source; `tegh unwrap` and then `tegh wrap claude` again add both. tegh does not add the trusted
-source to an existing manifest on its own, because the manifest's envelope hash binds the grants the
-wrap issued, and changing it would quarantine every one of them.
+This mediates a built-in call and does not contain it: the answer binds only as far as Claude Code
+asks for it and enforces it, and a call the broker permits runs with your user's full reach. With
+the gateway down the hook exits 2 and Claude Code refuses the call. If the hook itself crashes or
+hangs, the `PreToolUse` entry's `onFailure: "block"` setting refused the call on Claude Code
+2.1.295. When Claude Code does not run the hook at all (`--bare`, `disableAllHooks` in a lower
+settings file, an entry removed), its own permission rules decide, and in `auto` mode, the default
+for interactive sessions, those ran calls with no approval at all; a read-only shell command such as
+`echo` runs in `default` mode the same way. `docs/managed-profile.md` defines the managed settings
+that held against each of those on a test runner, and tegh does not install them. The harness
+reference (`docs/references/harnesses/claude-code.md`, §3 "Failure semantics" and §4 "Managed
+settings, observed 2026-10-12") records each observation. Each built-in call now also runs two short
+processes. A project wrapped by an earlier tegh lacks the `PreToolUse` hook, and its manifest
+declares nothing the broker could decide a built-in call by; one wrapped before tegh added any hook
+also lacks the `PostToolUse` hook and the trusted read source. `tegh unwrap` and then `tegh wrap
+claude` again add them. tegh does not add any of this to an existing manifest on its own, because
+the manifest's envelope hash binds the grants the wrap issued, and changing it would quarantine
+every one of them.
 
 To see the broker's answers verbatim, or to do this step without Claude Code, `tegh call` drives one
 call through the same gateway as the same principal. The samples on this page were captured this
@@ -582,10 +596,11 @@ unwrapped /Users/you/tegh-demo (wrapped 2026-10-04T15:11:54.699203+00:00). The h
 
 Restores the displaced config **byte-for-byte**, with the permission bits the file already had.
 
-The sample above was captured before tegh added the built-in tool hook. An unwrap now also has a
-`remove` line for tegh's `PostToolUse` hook entry in `.claude/settings.local.json`, and another
-for the file itself when the wrap created it and nothing else has been added to it. A hook you
-added beside it, in the same list or the same group, is kept.
+The sample above was captured before tegh added the built-in tool hooks. An unwrap now also has
+`remove` lines for tegh's `PreToolUse` and `PostToolUse` hook entries in
+`.claude/settings.local.json`, and another for the file itself when the wrap created it and nothing
+else has been added to it. A hook you added beside them, in the same list or the same group, is
+kept.
 
 Leaving the admitted rows in place does not shorten the next wrap. As of 0.1.1 a second `tegh wrap`
 asks the tool review again, for every tool (#13). It remembers only the values you classified as
@@ -689,9 +704,14 @@ Stated because every claim here names its posture or is an overclaim (the platfo
   identity is refused there rather than silently downgrading the record.
 - **MCP servers still run unconfined.** tegh spawns them as child processes with the environment it
   was told to give them. It decides *whether a call happens*, not what the server does once it runs.
-- **Claude Code's built-in tools are observed, not gated or contained.** The hook reports a call
-  after it ran, so a built-in write, shell command or fetch happens whatever the broker would have
-  said. A read the hook classifies wrongly, a read made through Bash, and any call made while the
-  hook is failing or has been removed leave the turn untainted. One gateway per project holds the
-  address the hook reports to, so two Claude Code sessions in one project report to the first
-  one's turn. Containment is what closes this, and it is posture 2.
+- **Claude Code's built-in tools are mediated, not contained.** The broker decides a built-in call
+  before it runs only when Claude Code runs the hook and enforces the answer. A hook Claude Code
+  does not run (`--bare`, `disableAllHooks` in a lower settings file, a removed entry) leaves the
+  call to Claude Code's own rules, which ran calls with no approval in `auto` mode on Claude Code
+  2.1.295; `docs/managed-profile.md` defines managed settings for that, and tegh does not install
+  them. A read the hook classifies wrongly and a read made through Bash leave the turn untainted. A
+  session whose hooks never run leaves nothing on the tape, and tegh cannot yet tell you it
+  happened ([wjatx/ptc-gal-reference#192](https://github.com/wjatx/ptc-gal-reference/issues/192)).
+  One gateway per project holds the address the hook reports to, so two Claude Code sessions in one
+  project report to the first one's turn. A call the broker permits runs with your user's full
+  reach. Containment is what closes this, and it is posture 2.

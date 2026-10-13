@@ -2314,28 +2314,53 @@ def _signature_line(loaded: LoadedLock) -> str:
 
 
 def _built_in_tools_line(project: Path) -> str:
-    """Whether this project's built-in tool calls reach the tape, read off the disk.
+    """Whether this project's built-in tool calls are asked about and reported, read off the disk.
 
     Read from the harness's settings, as `_is_interposed` reads its config: the
-    question is what the harness would run. Either way the answer says the
-    calls are not gated, because nothing tegh installs gates them.
+    question is what the harness would run. Three readings, as `tegh posture`
+    makes them (`posture._built_ins_line`): MEDIATED needs both of tegh's
+    entries, the `PreToolUse` one that asks the broker before each call and the
+    `PostToolUse` one that reports it after. No answer calls them contained,
+    because nothing tegh installs contains them.
     """
     site = hook_config_site(Harness.CLAUDE_CODE, project)
     if site is None:
-        return "built-in tools: NOT observed and not gated"
+        return "built-in tools: NOT observed, not mediated and not contained"
     try:
-        commands = hooksite.commands_at(site)
+        by_event = hooksite.commands_by_event(site)
     except (interpose.InterposeError, OSError):
         return (
-            f"built-in tools: UNKNOWN whether observed ({site.path} could not be "
-            "read); not gated either way"
+            f"built-in tools: UNKNOWN whether tegh's hooks reach them ({site.path} "
+            "could not be read); not contained either way"
         )
-    if any(hook_home_in(command, project=project) is not None for command in commands):
+
+    def runs_tegh(event: str) -> bool:
+        return any(
+            hook_home_in(command, project=project) is not None
+            for command in by_event.get(event, ())
+        )
+
+    pre, post = runs_tegh("PreToolUse"), runs_tegh("PostToolUse")
+    if pre and post:
         return (
-            "built-in tools: OBSERVED, not gated — tegh's PostToolUse hook in "
-            f"{site.path} reports each call to the tape; none is stopped"
+            "built-in tools: MEDIATED, not contained: tegh's PreToolUse hook in "
+            f"{site.path} asks the broker before each call and its PostToolUse hook "
+            "reports it after"
         )
-    return f"built-in tools: NOT observed and not gated — no tegh hook in {site.path}"
+    if post:
+        return (
+            "built-in tools: OBSERVED only (a wrap from an earlier tegh): tegh's "
+            f"PostToolUse hook in {site.path} reports each call after it ran and "
+            "nothing asks the broker before; unwrap and wrap again to add the "
+            "PreToolUse hook"
+        )
+    if pre:
+        return (
+            "built-in tools: DECIDED but not reported: tegh's PreToolUse hook in "
+            f"{site.path} asks the broker before each call and its PostToolUse hook "
+            "is missing; unwrap and wrap again to restore both"
+        )
+    return f"built-in tools: NOT observed, not mediated and not contained: no tegh hook in {site.path}"
 
 
 def status_command(args: argparse.Namespace) -> int:

@@ -31,8 +31,9 @@ one line there that is read per project: `_routing` reads the three `mcpServers`
 blocks tegh can write for the project and the line reports one of four states
 (the gateway is the only server in them, the gateway sits beside other servers,
 no entry runs the gateway, or tegh could not establish which). The second is the
-harness's built-in tools, which are ungated in every state; whether tegh's
-`PostToolUse` hook observes them after they run is also read per project. The
+harness's built-in tools, which are not contained in any state; whether tegh's
+`PreToolUse` hook asks the broker before each one and its `PostToolUse` hook
+reports it after is also read per project. The
 other three are static: a REMOTE server authenticating by HTTP header cannot be
 wrapped (`header_map` exists in the base and tegh does not emit it, while the
 stdio half relocates); MCP-stdio children spawn unconfined
@@ -399,8 +400,8 @@ def _interposition_line(routing: "Routing | bool") -> PostureLine:
             detail="the broker's MCP mouth is interposed, so an unadmitted tool is "
             f"refused by the broker and recorded. {_UNWRITABLE_SOURCES}. This gates "
             "the gateway's MCP tools only: the agent's built-in shell, file and "
-            "web tools do not go through the gateway and nothing decides them; at "
-            "most they are observed after they ran, which is the next line",
+            "web tools do not go through the gateway, and whether the broker is "
+            "asked about them before they run is the next line",
         )
     if routing.state == "beside-others":
         count = len(routing.beside)
@@ -513,109 +514,227 @@ def _is_interposed(project: Path, harness: Harness, home: Path | None = None) ->
     return _routing(project, harness, home).interposed
 
 
-#: The tests the built-ins line rests on: tegh reaches for no pre-call hook
-#: API anywhere, the one hook it installs registers for `PostToolUse` alone,
-#: and what that hook does with an MCP call the gateway did not serve and with
-#: a harness-internal tool is read off a real tape.
+#: The evidence the built-ins line rests on. The tests are what tegh installs and
+#: what its hook does on a real tape: the two entries a wrap writes and which of
+#: them blocks on failure, a decided read pairing with its report, a hold on a
+#: tainted turn, the hook refusing when no gateway answers, and the call that
+#: went around the broker. The two reference ranges are what Claude Code did with
+#: a failing hook and under managed settings, observed on 2.1.295; the platform's
+#: known limits state the same boundary from its side, and the open issue is the
+#: session that never calls home.
 _BUILT_INS_SOURCE = (
-    "tegh/tests/test_posture.py::test_tegh_names_no_builtin_tool_or_hook_api; "
-    "tegh/tests/test_hooksite.py::test_the_entry_is_post_tool_use_only_and_observes_every_tool; "
+    "tegh/tests/test_hooksite.py::"
+    "test_the_entries_are_pre_and_post_tool_use_and_only_the_pre_one_blocks_on_failure; "
+    "tegh/tests/test_hook_e2e.py::test_a_decided_read_and_its_report_pair_on_the_tape; "
     "tegh/tests/test_hook_e2e.py::"
-    "test_mcp_calls_on_the_tape_one_record_each_and_the_unbrokered_one_named"
+    "test_a_tainted_turn_holds_the_shell_when_the_envelope_lists_it; "
+    "tegh/tests/test_hook_e2e.py::"
+    "test_with_no_gateway_the_pre_hook_exits_2_and_prints_nothing; "
+    "tegh/tests/test_hook_e2e.py::"
+    "test_mcp_calls_on_the_tape_one_record_each_and_the_unbrokered_one_named; "
+    "docs/references/harnesses/claude-code.md:490-543 (onFailure, documented and observed); "
+    "docs/references/harnesses/claude-code.md:813-935 (managed settings, observed "
+    "2026-10-12, by cell); docs/managed-profile.md; "
+    "broker/GATEWAY.md (known limits: built-in tools are observed, and decided when "
+    "asked); wjatx/ptc-gal-reference#192"
 )
 
-#: What holds for built-ins whether or not they are observed.
-_NOT_GATED = (
-    "Nothing tegh installs runs before a built-in call or can stop, undo or "
-    "contain one, so a built-in write, shell command or fetch happens whatever "
-    "the broker would have said. Built-ins are contained at posture 2, never "
-    "gated here"
+#: What is true of built-ins whatever this project's hooks are.
+_NOT_CONTAINED = (
+    "Nothing here contains a built-in call: a call the broker permits runs with "
+    "the full reach of the agent's OS user, and an answer binds only as far as "
+    "Claude Code enforces it. The gap closes by containment, which is posture 2"
 )
 
+#: Where the mediation holds and where it stops, each limit with the matrix cell
+#: or the 2026-10-09 observation behind it (the reference ranges in the source).
+_MEDIATION_LIMITS = (
+    "Where it holds, from Claude Code 2.1.295 on a disposable macOS runner "
+    "(2026-10-09, and a managed-settings matrix on 2026-10-12, cited by cell). "
+    "With the gateway unreachable `tegh hook` exits 2 and the harness refuses "
+    "the call. If the hook fails some other way, the PreToolUse entry's "
+    "`onFailure: \"block\"` refused the call when the decider was down and when "
+    "it hung past the timeout (c08b, c08d), where without it the call ran (c08a, "
+    "c08c); this report reads that both entries are present and does not read "
+    "that key. Both act only on a hook that runs. A hook the harness does not run "
+    "leaves the call to Claude Code's own rules: outside managed settings, "
+    "`--bare`, CLAUDE_CODE_SIMPLE=1 and `disableAllHooks` in a lower settings "
+    "file each switched project hooks off without a word (observed 2026-10-09), "
+    "and anything that can write the settings file can remove an entry. Those "
+    "rules refuse a call with no allow rule in `default`, `dontAsk` and with no "
+    "mode flag (c01b, c01c, c01f); in `acceptEdits` a file write ran (observed "
+    "2026-10-09); in `auto`, the starting mode for interactive "
+    "sessions, the call ran (c01d, c01g) unless managed settings set "
+    "`disableAutoMode` (c01e, c01h); any allow rule the user adds approves it "
+    "unless managed settings set `allowManagedPermissionRulesOnly` (c02); and "
+    "`--dangerously-skip-permissions` runs it unless managed settings disable "
+    "bypass mode (c03a to c03d). A read-only shell command such as `echo` "
+    "runs in `default` mode with no decider and no allow rule, so where "
+    "the hook does not decide it the broker loses sight of it (observed "
+    "2026-10-09; c01f and c03c in the second run). A mod the user installs can "
+    "approve a call a hook outside managed settings refused (documented, not "
+    "tested). docs/managed-profile.md defines the managed settings that hold the "
+    "hooks in place against each of these (c04, c05, c09, c11); tegh installs "
+    "none and cannot yet read whether a machine has them. A session whose hooks "
+    "never run leaves nothing on the tape, so tegh cannot yet report a session "
+    "that never called home (wjatx/ptc-gal-reference#192)"
+)
 
-def _built_ins_line(observed: Optional[bool]) -> PostureLine:
-    """The agent's built-in tools: ungated always, and observed or not per project.
+#: What the PostToolUse report adds when it is the only hook.
+_REPORTED_AFTER = (
+    "After each built-in call the PostToolUse hook runs `tegh hook`, which "
+    "reports it to the gateway's audit tape. A read outside the project, a web "
+    "fetch or a web search taints the turn, so the agent's next external write "
+    "through the gateway is held; a read inside the project is recorded and "
+    "trusted. " 
+)
 
-    `observed` is read from the harness's settings at report time
-    (`_hook_observes`), for the reason `_interposition_line` reads the config:
-    the hook is a per-project fact a report must not assume. The verdict is
-    `no` in all three cases, because what the hook adds is evidence and a
-    taint, never a gate.
+#: How the hook classifies what it cannot place, in either line that has a hook.
+_CLASSIFIED = (
+    "A read made through the shell is classed `shell` and taints nothing. A call to an MCP tool the gateway does not serve (a plugin's "
+    "server, a claude.ai connector) is recorded as `claude-code-mcp other`, which "
+    "names it as a call that went around the broker, and taints nothing: tegh "
+    "cannot tell whether it read, and the platform has no class for it yet "
+    "(wjatx/ptc-gal-reference#187)"
+)
+
+_BUILT_INS_SUBJECT = "The agent's built-in tools (shell, file reads and writes, web)"
+
+
+@dataclass(frozen=True)
+class HookReading:
+    """Which of tegh's two hook entries this project's harness settings run.
+
+    Each is True, False, or None when the settings could not be read. The two
+    are read from one file, so they are None together.
     """
-    if observed:
-        detail = (
-            "OBSERVED, not gated: this project's harness settings carry tegh's "
-            "PostToolUse hook, so after each built-in call the harness runs "
-            "`tegh hook`, which reports it to the gateway's audit tape. A read "
-            "outside the project, a web fetch or a web search taints the turn, so "
-            "the agent's next external write through the gateway is held; a read "
-            "inside the project is recorded and trusted. A read made through the "
-            "shell is recorded as `shell` and taints nothing. A call to an MCP "
-            "tool the gateway does not serve (a plugin's server, a claude.ai "
-            "connector) is recorded as `claude-code-mcp other`, which names it as "
-            "a call that went around the broker, and taints nothing: tegh cannot "
-            "tell whether it read, and the platform has no class for it yet "
-            "(wjatx/ptc-gal-reference#187). Claude Code's own deferred-tool "
-            "lookup (`ToolSearch`) is not recorded. A hook that fails or is "
-            "removed lets calls through unrecorded (the harness fails open on "
-            "every hook failure). " + _NOT_GATED
+
+    pre: Optional[bool]
+    post: Optional[bool]
+
+
+#: A project with neither entry, the reading when nothing was read.
+NO_HOOKS = HookReading(pre=False, post=False)
+
+
+def _built_ins_line(hooks: HookReading = NO_HOOKS) -> PostureLine:
+    """The agent's built-in tools: mediated, observed, or neither, per project.
+
+    `hooks` is read from the harness's settings at report time
+    (`_hooks_installed`), for the reason `_interposition_line` reads the
+    config: which entries a project carries is a per-project fact a report
+    must not assume. MEDIATED needs both entries: the PreToolUse one is the ask,
+    and the PostToolUse one is the report the decision pairs with on the tape.
+    Even then the verdict is `partial`, never `yes`, because each limit in
+    `_MEDIATION_LIMITS` is a way a call proceeds without the broker's answer,
+    and nothing at all contains a built-in call.
+    """
+    if hooks.pre is None or hooks.post is None:
+        return PostureLine(
+            claim=f"{_BUILT_INS_SUBJECT}: whether tegh's hooks reach them is "
+            "UNKNOWN, and they are not contained either way",
+            holds="unknown",
+            source=_BUILT_INS_SOURCE,
+            detail="the harness settings that would carry tegh's PreToolUse and "
+            "PostToolUse hooks could not be read. " + _NOT_CONTAINED,
         )
-    elif observed is None:
-        detail = (
-            "whether they are even observed is UNKNOWN: the harness settings that "
-            "would carry tegh's PostToolUse hook could not be read. " + _NOT_GATED
+    if hooks.pre and hooks.post:
+        return PostureLine(
+            claim=f"{_BUILT_INS_SUBJECT} are MEDIATED by the broker, and not "
+            "contained",
+            holds="partial",
+            source=_BUILT_INS_SOURCE,
+            detail="this project's harness settings carry tegh's PreToolUse and "
+            "PostToolUse hooks. Before each built-in call the harness runs the "
+            "PreToolUse hook, which asks the broker and relays its answer, and that "
+            "answer is the only approval the call gets from tegh's side: tegh writes "
+            "no allow rule into any Claude Code settings. A refusal or a hold reaches "
+            "the agent as the broker's own sentence, and a held call is released "
+            "with `tegh approve`. A permitted read outside the project, a web fetch "
+            "or a web search taints the turn at the permit, before it runs; a read "
+            "inside the project is trusted. After the call the PostToolUse hook "
+            "reports it, and the report pairs with the decision on the tape. "
+            + _CLASSIFIED
+            + ". "
+            + _MEDIATION_LIMITS
+            + ". "
+            + _NOT_CONTAINED,
         )
-    else:
-        detail = (
-            "NOT observed either: this project's harness settings carry no tegh "
-            "hook (it was wrapped with --no-hooks, wrapped before tegh installed "
-            "one, or is not wrapped), so built-in calls reach neither the gateway "
-            "nor the tape. Unwrap and wrap again to add it. " + _NOT_GATED
+    if hooks.pre:
+        return PostureLine(
+            claim=f"{_BUILT_INS_SUBJECT} are DECIDED by the broker before they "
+            "run, NOT reported after, and not contained",
+            holds="partial",
+            source=_BUILT_INS_SOURCE,
+            detail="this project's harness settings carry tegh's PreToolUse hook and "
+            "not its PostToolUse hook, which a wrap never leaves on its own, so the "
+            "broker decides each built-in call and nothing reports it after it ran. "
+            "Unwrap and wrap again to restore both. " + _MEDIATION_LIMITS + ". "
+            + _NOT_CONTAINED,
+        )
+    if hooks.post:
+        return PostureLine(
+            claim=f"{_BUILT_INS_SUBJECT} are OBSERVED, not mediated and not "
+            "contained",
+            holds="no",
+            source=_BUILT_INS_SOURCE,
+            detail="this project's harness settings carry tegh's PostToolUse hook and "
+            "not its PreToolUse hook, which is how a wrap from tegh 0.3.0 left them. "
+            "Nothing asks the broker before a built-in call, so a write, shell "
+            "command or fetch happens whatever the broker would have said. "
+            + _REPORTED_AFTER
+            + _CLASSIFIED
+            + ". A hook that fails or is removed lets calls through unrecorded. "
+            "Unwrap and wrap again to add the PreToolUse hook. " + _NOT_CONTAINED,
         )
     return PostureLine(
-        claim="The agent's built-in tools (shell, file write, network) are ungated",
+        claim=f"{_BUILT_INS_SUBJECT} are NOT observed, not mediated and not "
+        "contained",
         holds="no",
-        # Cites TESTS rather than a grep, and deliberately. The first cut of
-        # this line cited `grep -rniE 'bash|builtin|PreToolUse|hook'`, which
-        # matched its own text the moment it was written, so re-running it
-        # verbatim contradicted the claim it was evidence for. A citation that
-        # a reader cannot re-run is worse than none: it looks checkable. The
-        # first test parses each module's AST and looks only at IDENTIFIERS, so
-        # prose about hooks (this comment included) is invisible to it; the
-        # second reads the one entry a wrap installs.
         source=_BUILT_INS_SOURCE,
-        detail=detail,
+        detail="this project's harness settings carry no tegh hook (it was wrapped "
+        "with --no-hooks, wrapped before tegh installed one, or is not wrapped), so "
+        "built-in calls reach neither the broker nor the tape. Unwrap and wrap again "
+        "to add both hooks. " + _NOT_CONTAINED,
     )
 
 
-def _hook_observes(project: Path, harness: Harness) -> Optional[bool]:
-    """True when this project's harness settings run tegh's hook for it.
+def _hooks_installed(project: Path, harness: Harness) -> HookReading:
+    """Which of tegh's hook entries this project's harness settings run.
 
-    False for none, and None when the settings cannot be read: unlike
-    `_is_interposed`, either answer is safe to give, because the line's verdict
-    does not move with it, so "unknown" is said rather than rounded down.
+    An entry counts when it runs `tegh hook` for THIS project, the reading
+    `tegh unwrap` uses (`launch.hook_home_in`). No hook site means neither;
+    settings that cannot be read mean unknown for both. Unlike `_routing`,
+    "unknown" is safe to say here, so it is said rather than rounded down.
     """
     try:
         from tegh.harnesses import hook_config_site  # noqa: PLC0415
-        from tegh.hooksite import commands_at  # noqa: PLC0415
+        from tegh.hooksite import commands_by_event  # noqa: PLC0415
         from tegh.launch import hook_home_in  # noqa: PLC0415
 
         site = hook_config_site(harness, project)
         if site is None:
-            return False
-        commands = commands_at(site)
+            return NO_HOOKS
+        by_event = commands_by_event(site)
     except Exception:  # noqa: BLE001 — any failure means "not known"
-        return None
-    return any(hook_home_in(command, project=project) is not None for command in commands)
+        return HookReading(pre=None, post=None)
+
+    def runs_tegh(event: str) -> bool:
+        return any(
+            hook_home_in(command, project=project) is not None
+            for command in by_event.get(event, ())
+        )
+
+    return HookReading(pre=runs_tegh("PreToolUse"), post=runs_tegh("PostToolUse"))
 
 
 def _invariant_gaps(
-    routing: "Routing | bool" = False, observed: Optional[bool] = False
+    routing: "Routing | bool" = False, hooks: HookReading = NO_HOOKS
 ) -> list[PostureLine]:
     """The gaps that are live today, stated in the present tense."""
     return [
         _interposition_line(routing),
-        _built_ins_line(observed),
+        _built_ins_line(hooks),
         PostureLine(
             claim="A REMOTE server that authenticates by HTTP header cannot be wrapped",
             holds="no",
@@ -998,9 +1117,11 @@ def _rung_reason(routing: Routing) -> PostureLine:
             "connector) is not behind the gateway. It is not "
             "posture 2: tegh runs as the same OS user as the agent it serves, so a "
             "determined same-user adversary reads and writes tegh's home too. "
-            "The agent's built-in shell, file and web tools are gated by nothing: "
-            "with tegh's hook installed they are observed after they run, and a "
-            "read outside the project taints the turn",
+            "The agent's built-in shell, file and web tools are not behind the "
+            "gateway and are not contained. With both of tegh's hooks installed the "
+            "broker decides each one before it runs, as far as Claude Code asks; the "
+            "built-ins line below says whether this project has them and where that "
+            "stops",
         )
     if routing.state == "beside-others":
         return PostureLine(
@@ -1061,7 +1182,7 @@ def build_report(
 
     routing = _routing(project, harness, harness_home)
     wrapped = routing.interposed
-    gaps = _invariant_gaps(routing, _hook_observes(project, harness))
+    gaps = _invariant_gaps(routing, _hooks_installed(project, harness))
 
     # Off-cluster this is empty, and deliberately: a laptop report should not
     # grow a row of "no cluster here" lines. The posture itself is NOT raised by

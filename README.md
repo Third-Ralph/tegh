@@ -34,17 +34,28 @@ repository's CI. No community-maintained adapter exists.
 
 What the Claude Code row covers, and where it stops:
 
-- **The gateway's MCP tools are gated. Built-in tools are observed, not gated.** tegh rewrites the
-  three configuration blocks it can write for the project (local, project and user scope) so that
-  the gateway is the only MCP server in them, and the broker decides every call to a tool the
-  gateway serves. A server Claude Code loads from somewhere tegh cannot write, such as a plugin or
-  a claude.ai connector, is not behind the gateway. Claude Code's built-in shell, file and network
-  tools do not go through the gateway and nothing tegh does stops one. `tegh wrap` adds a `PostToolUse` hook to the project's
-  `.claude/settings.local.json`, which reports each built-in call to the audit tape after it ran. A
-  read outside the project, a web fetch or a web search taints the turn, so the agent's next
-  external write through the gateway is held for you. A hook that fails, or that the agent manages
-  to remove, lets calls through unrecorded, and every built-in call now runs one short `tegh hook`
-  process. `tegh wrap --no-hooks` leaves the hook out.
+- **The gateway's MCP tools are gated. Built-in tools are mediated by the broker, and not
+  contained.** tegh rewrites the three configuration blocks it can write for the project (local,
+  project and user scope) so that the gateway is the only MCP server in them, and the broker
+  decides every call to a tool the gateway serves. A server Claude Code loads from somewhere tegh
+  cannot write, such as a plugin or a claude.ai connector, is not behind the gateway. Claude
+  Code's built-in shell, file and network tools do not go through the gateway. `tegh wrap` adds two
+  hooks to the project's `.claude/settings.local.json`: a `PreToolUse` hook that asks the broker
+  before each built-in call and relays its answer, and a `PostToolUse` hook that reports the call to
+  the audit tape after it ran. tegh writes no allow rule, so the broker's answer is the only
+  approval a built-in call gets from tegh's side, and a refusal or a hold reaches the agent in the
+  broker's own words. A read outside the project, a web fetch or a web search taints the turn, so
+  the agent's next external write through the gateway is held for you. With the gateway down the
+  hook refuses the call, and if the hook itself fails, its `onFailure: "block"` setting refused the
+  call on Claude Code 2.1.295. The answer binds only where Claude Code runs the hook: `--bare`,
+  `disableAllHooks` in a lower settings file or a removed entry leaves the call to Claude Code's own
+  rules, and those ran calls with no approval at all in `auto` mode, the default for interactive
+  sessions, and approve any call an allow rule you add names.
+  [`docs/managed-profile.md`](docs/managed-profile.md) defines managed settings that held against
+  each of those on a test runner, and says where that evidence stops; tegh does not install them.
+  Nothing contains a built-in call: a permitted one runs with your user's full
+  reach. Every built-in call now runs `tegh hook` twice, before and after. `tegh wrap --no-hooks`
+  leaves both hooks out.
 - **An MCP server tegh could not displace is observed, and nothing more.** Servers a plugin
   provides and claude.ai connectors are not in any configuration tegh can rewrite, so their tools
   stay callable without the broker. The hook records each such call as `claude-code-mcp other`,

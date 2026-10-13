@@ -14,6 +14,7 @@ clean, and no line claims a runtime protection that does not exist yet.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from pathlib import Path
 
@@ -23,7 +24,10 @@ import yaml
 from tegh.harnesses import claude_code, durability_line
 from tegh.lock import Harness
 from tegh.posture import (
+    HookReading,
     PostureLine,
+    _built_ins_line,
+    _hooks_installed,
     _is_interposed,
     _routing,
     build_report,
@@ -283,70 +287,153 @@ def test_the_live_gaps_are_named_unconditionally(project, store, phrase):
     assert phrase.lower() in text
 
 
-def test_tegh_names_no_builtin_tool_or_hook_api():
-    """tegh interposes on MCP servers only — it names no harness built-in tool
-    and no pre-tool-call hook API. This is the evidence for the posture line
-    saying built-ins are ungated.
+#: The words no claim about built-ins may use affirmatively. The honest words
+#: are MEDIATED and NOT CONTAINED: a hook is the harness agreeing to ask, and
+#: nothing tegh runs on one machine bounds what a permitted call can reach.
+_CONTAINMENT_WORDS = ("contained", "confined", "sandboxed")
+#: Never said of anything tegh does, negated or not.
+_FAIL_CLOSED_WORDS = ("fails closed", "fail closed", "fail-closed", "fails-closed")
 
-    Identifiers only, via the AST. The first version of this evidence was a text
-    grep quoted inside the posture line itself, which matched its own prose and
-    so contradicted the claim it supported the moment it shipped. Prose about
-    hooks — docstrings, comments, this one — is invisible here; only code that
-    actually reaches for such an API can fail it.
+
+def _overclaims(line: PostureLine) -> list[str]:
+    """Each sentence of `line` that calls built-ins contained, or anything fail-closed.
+
+    Sentence by sentence, because a line about pods may say a pod is contained
+    (`tegh/cluster.py`), and that is a claim about the pod. Only a sentence that
+    names built-ins is held to the containment words, and only where the word
+    is not negated: "not contained" is the required wording.
     """
-    import ast
-
-    vocabulary = {
-        "PreToolUse", "beforeMCPExecution", "pre_tool_call", "trustedToolPolicy",
-        "register_hook", "before_tool_call", "pre_mcp_tool_use",
-    }
-    offenders: list[str] = []
-    for py in sorted((Path(__file__).resolve().parents[1]).rglob("*.py")):
-        for node in ast.walk(ast.parse(py.read_text())):
-            name = (
-                node.attr if isinstance(node, ast.Attribute)
-                else node.id if isinstance(node, ast.Name)
-                else node.name if isinstance(node, (ast.FunctionDef, ast.ClassDef))
-                else None
-            )
-            if name in vocabulary:
-                offenders.append(f"{py.name}:{node.lineno}: {name}")
-
-    assert not offenders, (
-        "tegh reached for a harness built-in/hook API — the posture line claiming "
-        "built-ins are ungated is now wrong:\n  " + "\n  ".join(offenders)
-    )
+    found = []
+    for sentence in re.split(r"(?<=[.;:])\s+", f"{line.claim}. {line.detail}"):
+        lowered = sentence.lower()
+        found.extend(f"{word!r} in: {sentence}" for word in _FAIL_CLOSED_WORDS if word in lowered)
+        if "built-in" not in lowered:
+            continue
+        for word in _CONTAINMENT_WORDS:
+            for match in re.finditer(rf"\b{word}\b", lowered):
+                if not re.search(r"\b(?:not|never)\s+(?:\w+\s+)?$", lowered[: match.start()]):
+                    found.append(f"{word!r} in: {sentence}")
+    return found
 
 
-def test_the_built_ins_line_reads_the_hook_and_never_moves_its_verdict(tmp_path):
-    """Observed or not, built-ins are ungated: the hook adds evidence, never a gate.
+def test_no_posture_line_calls_built_ins_contained_or_anything_fail_closed():
+    """Every line tegh builds, in every routing and hook state, cluster and
+    harness lines included (`test_posture_citations._static_lines`).
 
-    Read from the project's harness settings, so a wrap with `--no-hooks` and a
-    wrap with the hook report differently, and neither says "gated".
+    This replaces a test that tegh named no pre-call hook API anywhere, which
+    was the evidence for "built-ins are ungated". tegh now installs a
+    PreToolUse hook by design, so the guard moves from the code to the words:
+    what may not appear is a claim that the hook confines anything.
     """
+    from tegh.tests.test_posture_citations import _static_lines
+
+    lines = _static_lines()
+    assert any("built-in" in line.claim for line in lines)
+    offenders = [hit for line in lines for hit in _overclaims(line)]
+
+    assert not offenders, "\n".join(offenders)
+
+
+def test_the_overclaim_scan_has_teeth():
+    """A scan with no demonstrated failure is a scan nobody has run."""
+    def line(detail):
+        return PostureLine(claim="x", holds="no", source="tegh/posture.py", detail=detail)
+
+    assert _overclaims(line("Built-in tools are contained by the hook."))
+    assert _overclaims(line("The built-in shell is sandboxed here."))
+    assert _overclaims(line("The hook fails closed."))
+    assert not _overclaims(line("Built-in tools are mediated, and not contained."))
+    assert not _overclaims(line("This pod is contained."))
+
+
+#: Every reading `_hooks_installed` can return.
+_READINGS = {
+    "both": HookReading(pre=True, post=True),
+    "post only": HookReading(pre=False, post=True),
+    "pre only": HookReading(pre=True, post=False),
+    "neither": HookReading(pre=False, post=False),
+    "unreadable": HookReading(pre=None, post=None),
+}
+
+
+@pytest.mark.parametrize("state", sorted(_READINGS))
+def test_the_built_ins_line_says_mediated_only_with_both_hooks(state):
+    """MEDIATED needs the ask before the call and the report after it. A wrap
+    from 0.3.0 has only the report, and that is OBSERVED, verdict `no`."""
+    line = _built_ins_line(_READINGS[state])
+    text = f"{line.claim} {line.detail}"
+
+    assert ("MEDIATED" in text) == (state == "both"), (state, line.claim)
+    assert "not contained" in text, (state, line.claim)
+    expected = {
+        "both": "partial",
+        "post only": "no",
+        "pre only": "partial",
+        "neither": "no",
+        "unreadable": "unknown",
+    }[state]
+    assert line.holds == expected
+    if state == "post only":
+        assert "OBSERVED" in line.claim
+        assert "wrap again" in line.detail
+
+
+def test_the_mediated_line_names_each_limit_with_its_evidence():
+    """`partial`, never `yes`: each of these is a way a call proceeds without
+    the broker's answer, and the line has to say so with the cell behind it."""
+    detail = _built_ins_line(_READINGS["both"]).detail
+    for evidence in (
+        "c01d, c01g",            # auto mode ran the call with no decider
+        "c01e, c01h",            # managed disableAutoMode refused it
+        "c08b, c08d",            # onFailure: "block" refused a down or hung decider
+        "--bare",                # a hook the harness does not run
+        "read-only shell command",
+        "ptc-gal-reference#192", # a session that never calls home
+        "docs/managed-profile.md",
+    ):
+        assert evidence in detail, evidence
+
+
+@pytest.mark.parametrize(
+    ("events", "expected"),
+    [
+        (("PreToolUse", "PostToolUse"), HookReading(pre=True, post=True)),
+        (("PostToolUse",), HookReading(pre=False, post=True)),
+        (("PreToolUse",), HookReading(pre=True, post=False)),
+        ((), HookReading(pre=False, post=False)),
+    ],
+)
+def test_the_hooks_are_read_per_event_from_the_settings_file(tmp_path, events, expected):
+    """Read off the project's settings file, so a wrap from 0.3.0, a wrap with
+    both entries and a `--no-hooks` wrap report differently. The file is written
+    here directly, in the shape a wrap writes, so this test does not depend on
+    the writer."""
     from tegh.harnesses.claude_code import hook_command, hook_site
-    from tegh.hooksite import plan_hook, write_hook
-    from tegh.lock import Harness
-    from tegh.posture import _built_ins_line, _hook_observes
 
     project = tmp_path / "widget"
     project.mkdir()
-    assert _hook_observes(project, Harness.CLAUDE_CODE) is False
-    write_hook(plan_hook(hook_site(project), hook_command(
-        project, launcher=["tegh"], home=tmp_path / "tegh"
-    )))
-    assert _hook_observes(project, Harness.CLAUDE_CODE) is True
-    hook_site(project).path.write_text("not json", encoding="utf-8")
-    assert _hook_observes(project, Harness.CLAUDE_CODE) is None
+    command = hook_command(project, launcher=["tegh"], home=tmp_path / "tegh")
+    group = {"matcher": "", "hooks": [{"type": "command", "command": command}]}
+    site = hook_site(project)
+    site.path.parent.mkdir(parents=True)
+    site.path.write_text(
+        json.dumps({"hooks": {event: [group] for event in events}}), encoding="utf-8"
+    )
 
-    lines = {observed: _built_ins_line(observed) for observed in (True, False, None)}
-    assert {line.holds for line in lines.values()} == {"no"}
-    assert lines[True].detail.startswith("OBSERVED, not gated")
-    assert lines[False].detail.startswith("NOT observed")
-    for line in lines.values():
-        lowered = line.detail.lower()
-        for overclaim in ("confined", "blocked", "protected", "mediated"):
-            assert overclaim not in lowered, (overclaim, line.detail)
+    assert _hooks_installed(project, Harness.CLAUDE_CODE) == expected
+
+
+def test_unreadable_hook_settings_read_as_unknown_for_both(tmp_path):
+    from tegh.harnesses.claude_code import hook_site
+
+    project = tmp_path / "widget"
+    project.mkdir()
+    assert _hooks_installed(project, Harness.CLAUDE_CODE) == HookReading(False, False)
+    site = hook_site(project)
+    site.path.parent.mkdir(parents=True)
+    site.path.write_text("not json", encoding="utf-8")
+
+    assert _hooks_installed(project, Harness.CLAUDE_CODE) == HookReading(None, None)
 
 
 def test_no_gap_is_described_as_pending_or_planned(project, store):
