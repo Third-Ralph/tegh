@@ -56,11 +56,13 @@ What the Claude Code row covers, and where it stops:
   Nothing contains a built-in call: a permitted one runs with your user's full
   reach. Every built-in call now runs `tegh hook` twice, before and after. `tegh wrap --no-hooks`
   leaves both hooks out.
-- **An MCP server tegh could not displace is observed, and nothing more.** Servers a plugin
-  provides and claude.ai connectors are not in any configuration tegh can rewrite, so their tools
-  stay callable without the broker. The hook records each such call as `claude-code-mcp other`,
-  which is how the tape names a call that went around the gateway. It does not taint the turn:
-  tegh cannot tell whether the call read anything, and the platform has no tool class for it yet
+- **An MCP server tegh could not displace is asked about as `other`, and its reads are not
+  known to be reads.** Servers a plugin provides and claude.ai connectors are not in any
+  configuration tegh can rewrite, so their tools are not served by the gateway. The hook asks the
+  broker about each such call at the `other/unknown` coordinate under the harness code
+  `claude-code-mcp`, which is how the tape names a call that went around the gateway, and reports
+  it after it ran. It does not taint the turn: tegh cannot tell whether the call read anything,
+  and the platform has no tool class for it yet
   ([wjatx/ptc-gal-reference#187](https://github.com/wjatx/ptc-gal-reference/issues/187)). A read
   made through one of these servers therefore does not hold the next external write.
 - **What the hook leaves off the tape.** A call the gateway brokered is recorded once, by the

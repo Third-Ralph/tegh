@@ -298,7 +298,7 @@ def test_status_and_diff_say_whether_built_in_calls_are_observed(harness, capsys
     for command in ("status", "diff"):
         main([command, "--project", str(harness["project"])])
         out = capsys.readouterr().out
-        assert "built-in tools: OBSERVED, not gated" in out, (command, out)
+        assert "built-in tools: MEDIATED, not contained" in out, (command, out)
 
     site = claude_code.hook_site(harness["project"])
     site.path.write_text("{}\n", encoding="utf-8")

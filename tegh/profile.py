@@ -29,29 +29,19 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
-from tegh.hooksite import HOOK_TIMEOUT_SECONDS
-
-#: The two events a wrap hooks. Named here rather than taken from
-#: `tegh.hooksite`, whose entry builder at the time of writing took a command
-#: and no event, so the two groups are built below in the shape a wrap writes.
-PRE_TOOL_USE = "PreToolUse"
-POST_TOOL_USE = "PostToolUse"
+from tegh.hooksite import POST_TOOL_USE, PRE_TOOL_USE, hook_entry
 
 
-def _group(command: str, *, block_on_failure: bool) -> dict[str, Any]:
-    """One matcher group: every tool, one command hook running `command`."""
-    hook: dict[str, Any] = {
-        "type": "command",
-        "command": command,
-        "timeout": HOOK_TIMEOUT_SECONDS,
-    }
-    if block_on_failure:
-        # A PreToolUse hook that fails (crashes, hangs past its timeout) would
-        # otherwise let the call proceed. With this key the call was refused
-        # when the decider was down and when it hung (c08b, c08d); without it the
-        # call ran (c08a, c08c). It acts only on a hook that runs.
-        hook["onFailure"] = "block"
-    return {"matcher": "", "hooks": [hook]}
+def _group(command: str, event: str) -> dict[str, Any]:
+    """The matcher group a wrap writes under `event`, from the one builder a wrap uses.
+
+    Only the `PreToolUse` handler carries `"onFailure": "block"`: a hook that
+    fails (crashes, hangs past its timeout) would otherwise let the call
+    proceed. With that key the call was refused when the decider was down and
+    when it hung (c08b, c08d); without it the call ran (c08a, c08c). It acts
+    only on a hook that runs.
+    """
+    return hook_entry(command, event)
 
 
 def managed_profile(
@@ -89,8 +79,8 @@ def managed_profile(
         # (c11a, c11b), and the runner's user could not overwrite, add to or
         # rename the policy file (c09). A managed COMMAND hook was not tested.
         "hooks": {
-            PRE_TOOL_USE: [_group(hook_command, block_on_failure=True)],
-            POST_TOOL_USE: [_group(hook_command, block_on_failure=False)],
+            PRE_TOOL_USE: [_group(hook_command, PRE_TOOL_USE)],
+            POST_TOOL_USE: [_group(hook_command, POST_TOOL_USE)],
         },
         # Drops a project or user hook and keeps the managed one (c04a to c04d).
         # Under it the wrap's own entries in the project's local file are
