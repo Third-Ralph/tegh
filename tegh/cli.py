@@ -402,7 +402,6 @@ def _synthesize_manifest(
             # the wrapped agent gets. `wrap --daily-cap` is how the operator
             # says it out loud.
             "caps": {"actions_per_utc_day": daily_cap},
-            "allowlists": {"tools": grant_classes},
             # A read the harness's own Read tool made INSIDE the project is
             # recorded and does not taint the turn; every other reported read
             # (a file under the home directory or elsewhere, a web fetch, a web

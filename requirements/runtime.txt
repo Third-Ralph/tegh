@@ -608,9 +608,9 @@ rpds-py==2026.6.3 \
     # via
     #   jsonschema
     #   referencing
-safe-agents==0.75.0 \
-    --hash=sha256:11617f411af020a56a6b1225d9cff3046b1698454918415bc852c86bf4691a6c \
-    --hash=sha256:44eb6d683dc2fce273add8811c1f26125f2601e36c1e630e2fbf357e86120c95
+safe-agents==0.76.0 \
+    --hash=sha256:3b5593c19f3975c57acc5d275ecbfc2937078c557c36a8a0896a4db3db3acce6 \
+    --hash=sha256:91057c2b2292adcf98e9663855e92a9c2d21e8f4b25af927143522b47f736cb6
     # via tegh (pyproject.toml)
 sse-starlette==3.5.0 \
     --hash=sha256:3e6e1070df3f0f5d9cea81496de92dbb72f6721871d99748ece67441dd8b7997 \
