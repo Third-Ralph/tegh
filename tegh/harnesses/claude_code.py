@@ -117,23 +117,41 @@ from tegh.posture import PostureLine
 #: doc read; see docs/posture-ladder.md on the coverage artifact.
 #:
 #: A wrap writes at TWO sites, and the line covers both: the `mcpServers`
-#: blocks (`config_sites`) and the `PostToolUse` hook entry (`hook_site`). The
-#: one recorded run against a binary concerns the second kind of site only,
-#: and it shows the settings file holding while the script it named did not.
-#: tegh's entry names no script of its own (`tegh/launch.py::hook_argv` is the
-#: installed launcher plus `hook --project --home`), which moves the question
-#: to the launcher and the package behind it without answering it.
+#: blocks (`config_sites`) and the `PreToolUse` and `PostToolUse` hook entries
+#: (`hook_site`). The one recorded run against a binary concerns the second
+#: kind of site only, and it shows the settings file holding while the script
+#: it named did not. tegh's entries name no script of their own
+#: (`tegh/launch.py::hook_argv` is the installed launcher plus `hook --project
+#: --home`), which moves the question to the launcher and the package behind it
+#: without answering it.
+#:
+#: Managed settings answer part of it, and only part. A matrix run on a
+#: disposable macOS runner on 2026-10-12 (Claude Code 2.1.295, recorded by cell
+#: in the reference's §4, "Managed settings, observed 2026-10-12") found a
+#: managed hook and the policy file holding against everything it tried from
+#: the user's side (c04, c05, c09, c11), and `docs/managed-profile.md` defines
+#: the managed settings that carry the wrap's two entries. Two things keep the
+#: verdict `unknown` even so: tegh installs no managed settings and cannot read
+#: whether a machine has them, so this line cannot tell a managed project from
+#: an unmanaged one; and the matrix's managed hook was an HTTP hook, while
+#: tegh's is a command hook whose launcher sits outside the managed directory.
+#: The line moves only when tegh can read the managed file and the launcher
+#: question has a tested answer.
 DURABILITY = PostureLine(
-    claim="Whether a wrapped Claude Code agent can undo its own wrap is UNRESOLVED",
+    claim="Whether a wrapped Claude Code agent can undo its own wrap is UNRESOLVED: "
+    "managed settings hold the hook entries in place, and tegh cannot yet tell "
+    "whether this machine has them",
     holds="unknown",
-    source="docs/references/harnesses/claude-code.md:755-803, "
-    "docs/references/harnesses/claude-code.md:860-874, "
-    "docs/references/harnesses/claude-code.md:963-1005 "
+    source="docs/references/harnesses/claude-code.md:946-994, "
+    "docs/references/harnesses/claude-code.md:1051-1065, "
+    "docs/references/harnesses/claude-code.md:1168-1254, "
+    "docs/references/harnesses/claude-code.md:813-935 "
     "(the vendor's permission-modes page for the first range; the second records a "
     "statement with no vendor source; the third is what was and was not run against a "
-    "binary); tegh/launch.py for the command the hook entry runs",
+    "binary before 2026-10-12; the fourth is the managed-settings matrix, by cell); "
+    "docs/managed-profile.md; tegh/launch.py for the command the hook entries run",
     detail="A wrap writes two things an agent could undo: the mcpServers blocks in "
-    ".mcp.json and ~/.claude.json, and a PostToolUse hook entry in "
+    ".mcp.json and ~/.claude.json, and a PreToolUse and a PostToolUse hook entry in "
     "<project>/.claude/settings.local.json. Claude Code's hard-coded protected paths "
     "name .mcp.json, .claude.json and the .claude directory, and are evaluated BEFORE "
     "permission rules, so permissions.allow cannot pre-approve an in-session write. The "
@@ -144,14 +162,26 @@ DURABILITY = PostureLine(
     "reference records, with no vendor source, that `claude mcp remove` from a shell "
     "outside a session is ungated; whether the agent's own shell can take that path is "
     "not established. For the MCP config blocks all of this is a documentation claim: no "
-    "attempt to change them from inside a session is recorded. For hooks one headless "
-    "run is recorded, on 2026-10-06 with Claude Code 2.1.292: the agent's writes to the "
-    "project's .claude/settings.json were never granted, and it then overwrote the "
-    "script that hook ran, which sat outside .claude/, after which the next Bash call "
-    "ran. tegh's hook entry was not the hook in that run. It names no script of its own "
-    "and runs tegh through its installed launcher, by absolute path; whether a wrapped "
-    "agent can overwrite that launcher, or the tegh package behind it, is untested, and the "
-    "reference does not record either as a protected path",
+    "attempt to change them from inside a session is recorded. For hooks, without "
+    "managed settings, two runs are recorded. On 2026-10-06 with Claude Code 2.1.292 the "
+    "agent's writes to the project's .claude/settings.json were never granted, and it "
+    "then overwrote the script that hook ran, which sat outside .claude/, after which the "
+    "next Bash call ran. On 2026-10-09 with 2.1.295, `disableAllHooks` in the local "
+    "settings file, `--bare` and CLAUDE_CODE_SIMPLE=1 each switched project hooks off "
+    "without a word. Under managed settings a matrix run on 2026-10-12 with 2.1.295 "
+    "found the managed hook and the policy file holding against everything it tried "
+    "from the user's side: allowManagedHooksOnly dropped project and user hooks and kept "
+    "the managed one (c04), disableAllHooks below the managed file did not switch it off "
+    "(c05a to c05c), --bare and --safe-mode left it in place (c11a, c11b), and the "
+    "runner's user could not overwrite, add to or rename the policy file (c09). "
+    "docs/managed-profile.md defines managed settings that carry the wrap's two "
+    "entries; tegh installs none and cannot read whether this machine has them, which "
+    "is why this line stays unknown. The matrix's managed hook was an HTTP hook. tegh's "
+    "entries name no script of their own and run tegh through its installed launcher, "
+    "by absolute path, outside the managed directory; whether a wrapped agent can "
+    "overwrite that launcher, or the tegh package behind it, is untested with or "
+    "without managed settings, and the reference does not record either as a "
+    "protected path",
 )
 
 #: Which member of the format's one closed catalog this adapter speaks for
