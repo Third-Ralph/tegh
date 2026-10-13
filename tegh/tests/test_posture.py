@@ -385,7 +385,7 @@ def test_the_built_ins_line_says_mediated_only_with_both_hooks(state):
     assert line.holds == expected
     if state == "post only":
         assert "OBSERVED" in line.claim
-        assert "wrap again" in line.detail
+        assert "Run `tegh upgrade`" in line.detail and "wrap again" not in line.detail
     if state.endswith("altered"):
         assert "altered" in line.claim
         assert _READINGS[state].differs[0] in line.detail

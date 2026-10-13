@@ -339,12 +339,10 @@ for interactive sessions, those ran calls with no approval at all; a read-only s
 that held against each of those on a test runner, and tegh does not install them. The harness
 reference (`docs/references/harnesses/claude-code.md`, §3 "Failure semantics" and §4 "Managed
 settings, observed 2026-10-12") records each observation. Each built-in call now also runs two short
-processes. A project wrapped by an earlier tegh lacks the `PreToolUse` hook, and its manifest
-declares nothing the broker could decide a built-in call by; one wrapped before tegh added any hook
-also lacks the `PostToolUse` hook and the trusted read source. `tegh unwrap` and then `tegh wrap
-claude` again add them. tegh does not add any of this to an existing manifest on its own, because
-the manifest's envelope hash binds the grants the wrap issued, and changing it would quarantine
-every one of them.
+processes. A project wrapped by tegh 0.3.0 lacks the `PreToolUse` hook, and its manifest carries
+the `allowlists` key the platform now refuses, so its gateway does not start. `tegh upgrade
+--project "$(pwd)"` brings it to this version and keeps its tape; [A project wrapped by an earlier
+version](#a-project-wrapped-by-an-earlier-version) says what it changes.
 
 To see the broker's answers verbatim, or to do this step without Claude Code, `tegh call` drives one
 call through the same gateway as the same principal. The samples on this page were captured this
@@ -635,6 +633,45 @@ both stdin and stdout: a piped answer, or `tegh unwrap > out.txt` with the plan 
 nobody is reading, is refused and nothing is changed.
 
 ## A project wrapped by an earlier version
+
+### Wrapped by tegh 0.3.0
+
+A manifest tegh 0.3.0 wrote carries `envelope.allowlists`, which safe-agents 0.76.0 retired and
+refuses by name, and declares none of the coordinates the `PreToolUse` hook asks the broker about.
+`tegh gateway`, `tegh call`, `tegh approve` and `tegh diff` refuse such a project and name the
+command that brings it to this version, and `tegh status` and `tegh posture` say the same:
+
+```bash
+tegh upgrade --project "$(pwd)"
+```
+
+It prints what it will change and asks first; `--yes` answers in advance. It builds the manifest
+again from the values the stored one holds, the way a wrap builds one, and refuses without writing
+anything if the result would differ anywhere the upgrade does not explain, so a value you set is
+never dropped. The earlier manifest is kept beside the new one as `manifest.yaml.before-upgrade`.
+Then it runs the platform's grant ceremony: `seed` issues grants for the sixteen built-in tool
+coordinates, and `re-seed` re-attests each existing grant at its own level under the new envelope
+hash, with an issuer-signed record of it in the same write. That step is needed because the
+envelope hash is a content hash and moved with the platform, so every grant the earlier wrap issued
+is quarantined until it is re-attested; an unwrap and a new wrap would not do it, because `seed`
+never overwrites a grant. Last, it adds the `PreToolUse` hook beside the `PostToolUse` one 0.3.0
+installed, running the same command, and records it in the wrap backup so `tegh unwrap` takes it
+out. The audit tape is not touched, and `tegh audit --verify` checks the chain across the upgrade.
+
+If a ceremony step fails, the upgrade says which and exits 1 with the manifest already rewritten.
+Run `tegh upgrade` again: it finds the manifest current and runs the ceremony again, which skips
+what is done. On a manifest that is already current, `tegh upgrade` still asks and then runs
+`re-seed`, because the envelope hash can move with the platform while the manifest stays the same;
+it reports `manifest current;` with how many grants it re-attested, and prints `nothing to upgrade`
+and writes nothing when there was nothing to re-attest.
+Start the coding agent again afterwards, because a session that was running started its gateway on
+the refused manifest.
+
+A project wrapped before tegh added any hook gets the manifest and the grants brought up to date
+and no hook, because its wrap backup records none for an unwrap to take out. `tegh unwrap` and then
+`tegh wrap claude` add both hooks.
+
+### Wrapped under the earlier store layout
 
 Earlier versions of tegh kept one store database for every project, at `~/.tegh/tegh.db`. Admitted
 tools are keyed by server name and tool name, so two projects that named a server identically

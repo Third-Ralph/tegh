@@ -95,21 +95,15 @@ class TestSynthesizedManifestIsAccepted:
         assert decl.transport == "streamable-http" and decl.command is None
 
     def test_the_confirmed_pass_carries_tools_and_tool_ops(self) -> None:
-        from safe_agents.broker.schemas import McpToolDef, ToolOp
+        from safe_agents.broker.schemas import ToolOp
 
-        definition = McpToolDef(
-            server_id="notes",
-            tool_name="read_note",
-            input_schema={"type": "object"},
-            description="Read.",
-        )
         # external=True is REQUIRED of every declared MCP tool by the base.
         op = ToolOp(tool="notes", op="read_note", effect="read", external=True)
         manifest = AgentManifest.model_validate(
             _synthesize_manifest(
                 [_stdio()],
                 polarity="abstain",
-                tools_by_server={"notes": [(definition, op)]},
+                tools_by_server={"notes": [op]},
                 **_MANIFEST_CTX,
             )
         )

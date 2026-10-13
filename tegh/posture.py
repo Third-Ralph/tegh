@@ -748,7 +748,8 @@ def _built_ins_line(hooks: HookReading = NO_HOOKS) -> PostureLine:
             + _REPORTED_AFTER
             + _CLASSIFIED
             + ". A hook that fails or is removed lets calls through unrecorded. "
-            "Unwrap and wrap again to add the PreToolUse hook. " + _NOT_CONTAINED,
+            "Run `tegh upgrade` for this project to add the PreToolUse hook. "
+            + _NOT_CONTAINED,
         )
     return PostureLine(
         claim=f"{_BUILT_INS_SUBJECT} are NOT observed, not mediated and not "
@@ -1052,6 +1053,10 @@ def _audit_lines(store: TeghStore, project: Path, *, runner=None) -> list[Postur
     this project's and say nothing about another one under the same home. A
     project wrapped under the earlier layout, whose admissions are in a
     database tegh does not read, is reported as that and nothing is audited.
+    A project whose manifest an earlier tegh wrote gets a line of its own
+    first, at `unknown`, naming `tegh upgrade`: the platform refuses that
+    manifest, so nothing is served, and the store is audited as usual because
+    the audit does not read it.
 
     Shelled out rather than imported, for the same reason the ceremony is
     (`cli.py`): tegh may import `safe_agents.broker.schemas` and the gateway
@@ -1070,9 +1075,27 @@ def _audit_lines(store: TeghStore, project: Path, *, runner=None) -> list[Postur
             )
         ]
 
+    from tegh.upgrade import earlier_wrap_refusal  # noqa: PLC0415 - upgrade.py reaches cli.py
+
+    earlier = earlier_wrap_refusal(store, project)
+    lines = (
+        [
+            PostureLine(
+                claim="Whether anything is served for this project is UNKNOWN: its "
+                "manifest is one an earlier tegh wrote, and the platform refuses to "
+                "load it",
+                holds="unknown",
+                source=f"{store.manifest_path(project)}; tegh/upgrade.py",
+                detail=earlier,
+            )
+        ]
+        if earlier is not None
+        else []
+    )
+
     database = store.db_path(project)
     if not database.exists():
-        return [
+        return lines + [
             PostureLine(
                 claim="No local store database exists yet",
                 holds="unknown",
@@ -1090,7 +1113,7 @@ def _audit_lines(store: TeghStore, project: Path, *, runner=None) -> list[Postur
         env = store.ceremony_env(role="checker", project=project)
         env.update(inherited_env(_AUDIT_VERIFY_KEYS_ENV))
     except TeghStoreError as exc:
-        return [
+        return lines + [
             PostureLine(
                 claim="The store could not be audited",
                 holds="unknown",
@@ -1103,7 +1126,7 @@ def _audit_lines(store: TeghStore, project: Path, *, runner=None) -> list[Postur
     try:
         completed = run(env, str(database))
     except OSError as exc:  # pragma: no cover - environment-dependent
-        return [
+        return lines + [
             PostureLine(
                 claim="The store audit could not be run",
                 holds="unknown",
@@ -1113,7 +1136,7 @@ def _audit_lines(store: TeghStore, project: Path, *, runner=None) -> list[Postur
         ]
 
     if completed.returncode == 2 or not completed.stdout.strip():
-        return [
+        return lines + [
             PostureLine(
                 claim="The store audit could not run against this store",
                 holds="unknown",
@@ -1126,7 +1149,7 @@ def _audit_lines(store: TeghStore, project: Path, *, runner=None) -> list[Postur
     try:
         payload = json.loads(completed.stdout)
     except ValueError:  # pragma: no cover - defensive
-        return [
+        return lines + [
             PostureLine(
                 claim="The store audit produced output this version cannot parse",
                 holds="unknown",
@@ -1135,7 +1158,7 @@ def _audit_lines(store: TeghStore, project: Path, *, runner=None) -> list[Postur
             )
         ]
 
-    lines = [_integrity_line(payload, database)]
+    lines.append(_integrity_line(payload, database))
     if payload["skipped_rules"]:
         lines.append(
             PostureLine(

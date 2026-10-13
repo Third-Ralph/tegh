@@ -68,6 +68,7 @@ from typing import Any
 from safe_agents.broker.api import GatewayClient, GatewayClientError, result_text
 from tegh.launch import gateway_argv, harness_spawn_env, tegh_launcher
 from tegh.store import TeghStore, tegh_home
+from tegh.upgrade import earlier_wrap_refusal
 
 EXIT_EXECUTED = 0
 EXIT_NOT_EXECUTED = 1
@@ -126,7 +127,9 @@ def _wrapped_store(args: argparse.Namespace) -> tuple[Path, TeghStore]:
     child that exited during the handshake, wrapped in a client error about a
     missing reply. Saying it here says it plainly and spawns nothing. The last
     is the project wrapped under an earlier store layout, which
-    `TeghStore.gateway_env` refuses for the gateway.
+    `TeghStore.gateway_env` refuses for the gateway, and then one whose
+    manifest an earlier tegh wrote (`upgrade.earlier_wrap_refusal`), which the
+    platform refuses to load.
     """
     project = Path(args.project).expanduser().resolve()
     store = TeghStore(home=Path(args.home).expanduser() if args.home else tegh_home())
@@ -141,6 +144,9 @@ def _wrapped_store(args: argparse.Namespace) -> tuple[Path, TeghStore]:
     earlier_layout = store.layout_refusal(project)
     if earlier_layout is not None:
         raise _CannotAsk(earlier_layout)
+    earlier_wrap = earlier_wrap_refusal(store, project)
+    if earlier_wrap is not None:
+        raise _CannotAsk(earlier_wrap)
     return project, store
 
 

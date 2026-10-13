@@ -1,6 +1,6 @@
 """The `tegh` command — pin the MCP tools a coding project already uses.
 
-Eleven subcommands, and a deliberate division of labour with the base:
+Twelve subcommands, and a deliberate division of labour with the base:
 
   init     mint this machine's tegh home (HMAC key, local issuer signing key)
   wrap     discover -> snapshot -> review -> propose -> tegh.lock -> interpose -> admit
@@ -10,6 +10,7 @@ Eleven subcommands, and a deliberate division of labour with the base:
   approve  release a call the broker is holding (the local arm of the platform's owner-approval seam)
   audit    show this project's tape and where it lives; --verify checks the chain
   unwrap   restore the harness config the wrap displaced, credentials included, after asking
+  upgrade  bring a project an earlier tegh wrapped to this version, keeping its tape (`upgrade.py`)
   status   read the committed lock back and report what is pinned
   diff     the lock's pinned definitions vs. what the servers advertise NOW
   posture  which floor properties hold in THIS configuration, and which do not
@@ -45,7 +46,7 @@ import shlex
 import sys
 from dataclasses import dataclass, field as dc_field
 from pathlib import Path
-from typing import Callable, Collection, Mapping, Optional, Sequence
+from typing import Callable, Collection, Mapping, Optional, Protocol, Sequence
 
 import yaml
 
@@ -71,6 +72,7 @@ from tegh.discovery import (
 from tegh import hooksite
 from tegh import interpose
 from tegh import unwrap
+from tegh import upgrade
 from tegh.harnesses import claude_code, hook_config_site
 from tegh.hook import HARNESS_CODE as HOOK_HARNESS_CODE
 from tegh.hook import FILE_CLASSES, OTHER_CLASS, TOOL_TABLE, WEB_CLASSES
@@ -364,17 +366,33 @@ def _project_principal(project: Path) -> dict:
     }
 
 
+class ServerConnection(Protocol):
+    """What `_synthesize_manifest` reads of a server: how to reach it, and nothing else.
+
+    A `DiscoveredServer` is one. `tegh upgrade` passes another, read back out of
+    a stored manifest's `mcp_servers` block (`upgrade.py`).
+    """
+
+    server_id: str
+    transport: str
+    command: Optional[str]
+    args: Sequence[str]
+    cwd: Optional[str]
+    url: Optional[str]
+
+
 def _synthesize_manifest(
-    servers: Sequence[DiscoveredServer],
+    servers: Sequence[ServerConnection],
     *,
     polarity: str,
     project: Path,
     daily_cap: int,
-    tools_by_server: Optional[dict[str, list[tuple[McpToolDef, ToolOp]]]] = None,
-    env_by_server: Optional[dict[str, dict[str, str]]] = None,
-    credentials_by_server: Optional[dict[str, dict[str, str]]] = None,
+    tools_by_server: Optional[Mapping[str, Sequence[ToolOp]]] = None,
+    env_by_server: Optional[Mapping[str, Mapping[str, str]]] = None,
+    credentials_by_server: Optional[Mapping[str, Collection[str]]] = None,
     named: Optional[Collection[tuple[str, str]]] = None,
     hold_on_taint: Sequence[str] = (),
+    trusted_read_sources: Sequence[str] = TRUSTED_HARNESS_READS,
 ) -> dict:
     """Build key #1: the namespace + ToolOp declaration for this project.
 
@@ -399,6 +417,12 @@ def _synthesize_manifest(
     `credentials_by_server`. The base refuses an overlap between the two halves
     at manifest load, and the classification is what keeps them disjoint.
 
+    `tools_by_server` holds each server's confirmed ToolOps. A ToolOp's `tool`
+    is its server and its `op` is the tool's name (`classify.propose_tool_op`),
+    so the op names the tool in the namespace and nothing else is needed for it.
+    `credentials_by_server` is read for the field NAMES only; a mapping of
+    names to values passes as its keys.
+
     `named` limits the tool NAMESPACE to those `(server_id, tool_name)` pairs
     and leaves everything else (the classifications, the grant classes, the
     envelope they hash to) as confirmed. A tool the namespace does not name is
@@ -410,7 +434,9 @@ def _synthesize_manifest(
     broker can decide a built-in call. `hold_on_taint` is the envelope's
     `tainted_harness_hold`: the tool classes whose decision is held for approval
     on a tainted turn. It is always declared, and empty unless `wrap
-    --hold-when-tainted` names a class.
+    --hold-when-tainted` names a class. `trusted_read_sources` is the
+    envelope's list of the same name; a wrap leaves it at
+    `TRUSTED_HARNESS_READS`, and `tegh upgrade` carries a stored one over.
     """
     confirmed = tools_by_server or {}
     environments = env_by_server or {}
@@ -433,16 +459,16 @@ def _synthesize_manifest(
                     declaration["env"] = dict(environment)
         else:
             declaration["url"] = server.url
-        admitted = confirmed.get(server.server_id, [])
+        admitted = confirmed.get(server.server_id, ())
         callable_ = [
-            {"tool_name": definition.tool_name}
-            for definition, _ in admitted
-            if named is None or (server.server_id, definition.tool_name) in named
+            {"tool_name": op.op}
+            for op in admitted
+            if named is None or (server.server_id, op.op) in named
         ]
         if callable_:
             declaration["tools"] = callable_
         mcp_servers[server.server_id] = declaration
-        tool_ops.extend(op.model_dump(mode="json") for _, op in admitted)
+        tool_ops.extend(op.model_dump(mode="json") for op in admitted)
     tool_ops.extend(dict(op) for op in HARNESS_TOOL_OPS)
 
     # The admitted coordinates, as the action classes the gateway will serve.
@@ -490,7 +516,7 @@ def _synthesize_manifest(
             # every read of it would hold every write it makes. Trusting it is
             # a consumer decision, made here and named as a source id built
             # from codes, never a path (the platform's GATEWAY.md G24).
-            "trusted_read_sources": list(TRUSTED_HARNESS_READS),
+            "trusted_read_sources": list(trusted_read_sources),
             # Declared in every manifest, and empty unless the operator names a
             # class: on a tainted turn the broker holds a built-in call of a
             # listed class for approval (PDP rule `tainted_harness_hold`).
@@ -1202,7 +1228,9 @@ def _already_wrapped(result: DiscoveryResult, project: Path) -> Optional[str]:
     the command `gateway_entry` writes) and at any scope, shadowed or not. The
     name is not the test: `tegh` is only what a wrap happens to call it.
 
-    The way out it names is `tegh unwrap`, with the tegh home the entry itself
+    A project whose manifest an earlier tegh wrote is sent to `tegh upgrade`
+    (`upgrade.py`), which keeps what it admitted. Otherwise the way out it
+    names is `tegh unwrap`, with the tegh home the entry itself
     names, when that home holds the backup an unwrap restores from. When it
     does not, an unwrap would refuse for want of one, so the entry is named as
     something to remove by hand, and the servers as something to put back by
@@ -1214,7 +1242,15 @@ def _already_wrapped(result: DiscoveryResult, project: Path) -> Optional[str]:
         home = gateway_home_in([server.command, *server.args], project=project)
         if home is None:
             continue
-        if TeghStore(home=Path(home)).backup_path(project).exists():
+        wrapped_by = TeghStore(home=Path(home))
+        if upgrade.carries_retired_key(wrapped_by.manifest_path(project)):
+            return (
+                f"{project} is already wrapped, by an earlier tegh whose manifest the "
+                "platform this tegh runs on refuses; nothing was changed, and `tegh "
+                f"upgrade {wrapped_by.named_as(project)}` brings it to this version, "
+                "keeping its admissions and its tape."
+            )
+        if wrapped_by.backup_path(project).exists():
             way_out = (
                 "restore the original servers with `tegh unwrap --project "
                 f"{_path(project)} --home {_path(home)}`"
@@ -1838,7 +1874,9 @@ def _prepare_wrap(
             polarity=args.polarity,
             project=project,
             daily_cap=args.daily_cap,
-            tools_by_server=confirmed,
+            tools_by_server={
+                server_id: [op for _, op in pairs] for server_id, pairs in confirmed.items()
+            },
             env_by_server=decisions.env_by_server,
             credentials_by_server=decisions.credentials_by_server,
             named=named,
@@ -2243,6 +2281,11 @@ def gateway_command(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    # Said before the platform reads the manifest: its refusal names the key
+    # and not the command that fixes it.
+    if (earlier := upgrade.earlier_wrap_refusal(store, project)) is not None:
+        print(f"REFUSED: {earlier}", file=sys.stderr)
+        return 2
     # The tool-event mouth's address file belongs to ONE gateway per project:
     # the one the session's hooks report to. Another gateway for the same
     # project (`tegh call`, or a harness listing the server's tools) opens no
@@ -2300,6 +2343,9 @@ def approve_command(args: argparse.Namespace) -> int:
             "it. Run `tegh wrap claude --project <path>` first.",
             file=sys.stderr,
         )
+        return 2
+    if (earlier := upgrade.earlier_wrap_refusal(store, project)) is not None:
+        print(f"REFUSED: {earlier}", file=sys.stderr)
         return 2
 
     argv = python_module_argv("safe_agents.broker.approval.release_cli", args.intent_id)
@@ -2360,6 +2406,20 @@ def unwrap_command(
     project = Path(args.project).expanduser().resolve()
     store = TeghStore(home=Path(args.home).expanduser() if args.home else tegh_home())
     return unwrap.run(store, project, yes=args.yes, prompt=prompt)
+
+
+def upgrade_command(
+    args: argparse.Namespace, *, prompt: Optional[Prompt] = None
+) -> int:
+    """Bring a project an earlier tegh wrapped to this version's manifest, grants and hook.
+
+    Says what it will change and asks first, as `unwrap` does; `--yes` answers
+    in advance. The plan, the order of the writes and the report are
+    `tegh.upgrade`'s.
+    """
+    project = Path(args.project).expanduser().resolve()
+    store = TeghStore(home=Path(args.home).expanduser() if args.home else tegh_home())
+    return upgrade.run(store, project, yes=args.yes, prompt=prompt)
 
 
 # ---------------------------------------------------------------------------
@@ -2458,7 +2518,7 @@ def _built_in_tools_line(project: Path) -> str:
         return (
             "built-in tools: OBSERVED only (a wrap from an earlier tegh): tegh's "
             f"PostToolUse hook in {site.path} reports each call after it ran and "
-            "nothing asks the broker before; unwrap and wrap again to add the "
+            "nothing asks the broker before; run `tegh upgrade` to add the "
             "PreToolUse hook"
         )
     if pre:
@@ -2506,6 +2566,8 @@ def status_command(args: argparse.Namespace) -> int:
     earlier_layout = store.layout_refusal(project)
     if earlier_layout is not None:
         print(f"\nNOT SERVED: {earlier_layout}")
+    elif (earlier := upgrade.earlier_wrap_refusal(store, project)) is not None:
+        print(f"\nNOT SERVED: {earlier}")
     return 0
 
 
@@ -2547,6 +2609,11 @@ def diff_command(args: argparse.Namespace) -> int:
     # Before anything is printed: this refuses a project wrapped under an
     # earlier store layout, and a refusal should be the only thing said.
     env = store.ceremony_env(role="maker", project=project)
+    # The snapshot reads the manifest through the platform, which would refuse
+    # an earlier tegh's once per server and name the key, not the fix.
+    if (earlier := upgrade.earlier_wrap_refusal(store, project)) is not None:
+        print(f"REFUSED: {earlier}", file=sys.stderr)
+        return 2
     # Drift is judged against the PINNED definitions, so whether those bytes are
     # the ones a human signed is a precondition for reading the diff at all —
     # printed here rather than left to `status`, which a `diff` user has no
@@ -2848,6 +2915,33 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     with_project(unwrap_parser)
     with_home(unwrap_parser)
 
+    upgrade_parser = sub.add_parser(
+        "upgrade",
+        help="bring a project an earlier tegh wrapped to this version, keeping its tape",
+        description=(
+            "Regenerate this project's manifest in this version's form from the "
+            "values it holds, issue grants for the new built-in tool classes, "
+            "re-attest the existing grants at their own level under the new "
+            "envelope hash, and add the PreToolUse hook beside a PostToolUse hook "
+            "an earlier wrap installed. The earlier manifest is kept beside the "
+            "new one, and the audit tape is not touched. The plan is printed "
+            "first and nothing changes until it is agreed to. On a manifest that "
+            "is already current it still runs re-seed, which re-attests any grant "
+            "a platform version's envelope hash has left behind and otherwise "
+            "writes nothing."
+        ),
+    )
+    upgrade_parser.add_argument(
+        "--yes",
+        action="store_true",
+        help=(
+            "agree to the plan in advance. Without it the prompt needs a "
+            "terminal on both stdin and stdout, and is refused otherwise"
+        ),
+    )
+    with_project(upgrade_parser)
+    with_home(upgrade_parser)
+
     status = sub.add_parser("status", help="report what this project's lock pins")
     with_project(status)
     with_home(status)
@@ -2906,6 +3000,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             return audit_command(args)
         if args.command == "unwrap":
             return unwrap_command(args)
+        if args.command == "upgrade":
+            return upgrade_command(args)
         if args.command == "status":
             return status_command(args)
         if args.command == "posture":
