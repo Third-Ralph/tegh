@@ -353,6 +353,13 @@ _READINGS = {
     "pre only": HookReading(pre=True, post=False),
     "neither": HookReading(pre=False, post=False),
     "unreadable": HookReading(pre=None, post=None),
+    "pre altered": HookReading(
+        pre=False, post=True, differs=("tegh's PreToolUse entry is there but x",)
+    ),
+    "post altered": HookReading(
+        pre=True, post=False, differs=("tegh's PostToolUse entry is there but x",)
+    ),
+    "disabled": HookReading(pre=False, post=False, disabled=True),
 }
 
 
@@ -371,11 +378,20 @@ def test_the_built_ins_line_says_mediated_only_with_both_hooks(state):
         "pre only": "partial",
         "neither": "no",
         "unreadable": "unknown",
+        "pre altered": "no",
+        "post altered": "no",
+        "disabled": "no",
     }[state]
     assert line.holds == expected
     if state == "post only":
         assert "OBSERVED" in line.claim
         assert "wrap again" in line.detail
+    if state.endswith("altered"):
+        assert "altered" in line.claim
+        assert _READINGS[state].differs[0] in line.detail
+    if state == "disabled":
+        assert "switches its own hooks off" in line.claim
+        assert "`disableAllHooks: true`" in line.detail
 
 
 def test_the_mediated_line_names_each_limit_with_its_evidence():
@@ -390,8 +406,38 @@ def test_the_mediated_line_names_each_limit_with_its_evidence():
         "read-only shell command",
         "ptc-gal-reference#192", # a session that never calls home
         "docs/managed-profile.md",
+        "c11b",                  # --safe-mode left the managed hook in place
+        "no cell tested CLAUDE_CODE_SIMPLE=1",
+        "which was not tested",  # the profile's command hook against the HTTP cells
+        "lines 537-542",         # a lower disableAllHooks, §3 "Failure semantics"
+        "lines 1236-1243",       # --bare, CLAUDE_CODE_SIMPLE=1, local disableAllHooks
     ):
         assert evidence in detail, evidence
+    # c01b, c01c and c01f ran a hook whose decider was down; they are not the
+    # evidence for a hook the harness never ran.
+    assert "(c04, c05, c09, c11)" not in detail
+    assert "With a hook that runs and a decider that is down" in detail
+    # The line ranges cited above still hold what they are cited for.
+    reference = (
+        Path(__file__).resolve().parents[2] / "docs" / "references" / "harnesses" / "claude-code.md"
+    ).read_text(encoding="utf-8").splitlines()
+    assert "`disableAllHooks` in the local settings file never runs" in "\n".join(
+        reference[536:542]
+    )
+    observed = "\n".join(reference[1235:1243])
+    assert "`CLAUDE_CODE_SIMPLE=1`" in observed and "local `disableAllHooks: true`" in observed
+
+
+def test_the_mediated_line_says_what_a_tainted_turn_permits_by_default():
+    """A shell command and a web fetch after a read of `~/.ssh` were permitted on a
+    real tape with no `--hold-when-tainted`; the line has to say so."""
+    detail = " ".join(_built_ins_line(_READINGS["both"]).detail.split())
+    assert (
+        "On a tainted turn a shell command, a web fetch and a file write or edit inside "
+        "the project are permitted unless the wrap named their class with "
+        "`--hold-when-tainted`"
+    ) in detail
+    assert "a file write or edit outside the project is held" in detail
 
 
 @pytest.mark.parametrize(
@@ -410,17 +456,124 @@ def test_the_hooks_are_read_per_event_from_the_settings_file(tmp_path, events, e
     the writer."""
     from tegh.harnesses.claude_code import hook_command, hook_site
 
+    from tegh.hooksite import hook_entry
+
     project = tmp_path / "widget"
     project.mkdir()
     command = hook_command(project, launcher=["tegh"], home=tmp_path / "tegh")
-    group = {"matcher": "", "hooks": [{"type": "command", "command": command}]}
     site = hook_site(project)
     site.path.parent.mkdir(parents=True)
     site.path.write_text(
-        json.dumps({"hooks": {event: [group] for event in events}}), encoding="utf-8"
+        json.dumps({"hooks": {event: [hook_entry(command, event)] for event in events}}),
+        encoding="utf-8",
     )
 
     assert _hooks_installed(project, Harness.CLAUDE_CODE) == expected
+
+
+def _no_matcher(settings):
+    del settings["hooks"]["PreToolUse"][0]["matcher"]
+    del settings["hooks"]["PostToolUse"][0]["matcher"]
+
+
+@pytest.mark.parametrize(
+    ("edit", "expected"),
+    [
+        pytest.param(lambda s: None, HookReading(pre=True, post=True), id="as a wrap writes"),
+        pytest.param(_no_matcher, HookReading(pre=True, post=True), id="no matcher key"),
+        pytest.param(
+            lambda s: s["hooks"]["PreToolUse"][0].update(matcher="Read"),
+            HookReading(
+                pre=False,
+                post=True,
+                differs=(
+                    "tegh's PreToolUse entry is there but has the matcher `\"Read\"`, "
+                    'where a wrap writes `""` to match every tool',
+                ),
+            ),
+            id="PreToolUse matcher Read",
+        ),
+        pytest.param(
+            lambda s: s["hooks"]["PreToolUse"][0]["hooks"][0].pop("onFailure"),
+            HookReading(
+                pre=False,
+                post=True,
+                differs=('tegh\'s PreToolUse entry is there but carries no `onFailure: "block"`',),
+            ),
+            id="PreToolUse without onFailure",
+        ),
+        pytest.param(
+            lambda s: s["hooks"]["PreToolUse"][0]["hooks"][0].update(onFailure="continue"),
+            HookReading(
+                pre=False,
+                post=True,
+                differs=(
+                    "tegh's PreToolUse entry is there but carries "
+                    '`onFailure: "continue"` and not `"block"`',
+                ),
+            ),
+            id="PreToolUse onFailure continue",
+        ),
+        pytest.param(
+            lambda s: s["hooks"]["PostToolUse"][0].update(matcher="Write"),
+            HookReading(
+                pre=True,
+                post=False,
+                differs=(
+                    "tegh's PostToolUse entry is there but has the matcher `\"Write\"`, "
+                    'where a wrap writes `""` to match every tool',
+                ),
+            ),
+            id="PostToolUse matcher Write",
+        ),
+        pytest.param(
+            lambda s: s.update(disableAllHooks=True),
+            HookReading(pre=False, post=False, disabled=True),
+            id="disableAllHooks in the same file",
+        ),
+        pytest.param(
+            lambda s: s.update(disableAllHooks=False),
+            HookReading(pre=True, post=True),
+            id="disableAllHooks false",
+        ),
+        pytest.param(
+            lambda s: s["hooks"]["PreToolUse"][0]["hooks"][0].update(timeout=1),
+            HookReading(pre=True, post=True),
+            id="timeout is not read",
+        ),
+    ],
+)
+def test_an_entry_counts_only_in_the_shape_the_claim_rests_on(tmp_path, edit, expected):
+    """A tegh entry with another matcher, a PreToolUse entry without `onFailure:
+    "block"`, or a file that sets `disableAllHooks`, is not MEDIATED, and the
+    reading says what differs. The file starts as a wrap writes it."""
+    from tegh.harnesses.claude_code import hook_command, hook_site
+    from tegh.hooksite import HOOK_EVENTS, hook_entry
+
+    project = tmp_path / "widget"
+    project.mkdir()
+    command = hook_command(project, launcher=["tegh"], home=tmp_path / "tegh")
+    settings = {"hooks": {event: [hook_entry(command, event)] for event in HOOK_EVENTS}}
+    edit(settings)
+    site = hook_site(project)
+    site.path.parent.mkdir(parents=True)
+    site.path.write_text(json.dumps(settings), encoding="utf-8")
+
+    reading = _hooks_installed(project, Harness.CLAUDE_CODE)
+    assert reading == expected
+    assert reading.path == site.path
+
+
+def test_disable_all_hooks_with_no_tegh_entry_is_not_said_to_hold_teghs_hooks(tmp_path):
+    from tegh.harnesses.claude_code import hook_site
+
+    project = tmp_path / "widget"
+    project.mkdir()
+    site = hook_site(project)
+    site.path.parent.mkdir(parents=True)
+    site.path.write_text(json.dumps({"disableAllHooks": True}), encoding="utf-8")
+
+    assert _hooks_installed(project, Harness.CLAUDE_CODE) == HookReading(False, False)
 
 
 def test_unreadable_hook_settings_read_as_unknown_for_both(tmp_path):

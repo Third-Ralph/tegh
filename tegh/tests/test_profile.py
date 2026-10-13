@@ -85,3 +85,24 @@ def test_the_page_shows_exactly_what_the_function_returns():
 
     assert command == COMMAND
     assert shown == json.dumps(managed_profile(command), indent=2)
+
+
+REFERENCE = DOC.parent / "references" / "harnesses" / "claude-code.md"
+
+
+def test_the_reference_names_the_auto_mode_key_where_the_matrix_put_it():
+    """The matrix wrote `disableAutoMode` at the top level, as the profile does.
+
+    The reference's findings once called the tested key
+    `permissions.disableAutoMode`, which is the vendor's documented placement
+    and was not among the cells.
+    """
+    text = " ".join(REFERENCE.read_text(encoding="utf-8").split())
+
+    assert "Only managed `permissions.disableAutoMode:" not in text
+    assert (
+        'Only a managed `"disableAutoMode": "disable"`, which the matrix wrote at the '
+        "top level of the managed file, refused it there (c01e, c01h)."
+    ) in text
+    assert "that placement was not tested" in text
+    assert "disableAutoMode" in managed_profile(COMMAND)

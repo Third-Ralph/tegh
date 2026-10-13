@@ -358,6 +358,34 @@ def test_a_0_3_0_wrap_gets_the_pre_entry_added_and_only_that_comes_out_again(sit
     assert site.path.read_text(encoding="utf-8") == original
 
 
+def test_a_pre_entry_a_0_3_0_backup_does_not_record_is_left_and_named(site):
+    """A file with both entries and a backup that records PostToolUse alone.
+
+    The unwrap takes out only what the backup says the wrap added, so the
+    PreToolUse entry stays. With the gateway gone that entry refuses every
+    built-in call, so the plan names it (`left_in_place`) and never removes it.
+    """
+    site.path.parent.mkdir()
+    both = {"hooks": {event: [hooksite.hook_entry(COMMAND, event)] for event in (PRE, POST)}}
+    site.path.write_text(_render(both), encoding="utf-8")
+    backup = HookBackup.from_dict({**OLD_RECORD, "path": str(site.path), "dir_existed": True})
+
+    step = _unwrap(backup)
+    assert step.events_found == (POST,)
+    assert step.left_in_place == (PRE,)
+    assert not step.removes_file
+    assert json.loads(site.path.read_text(encoding="utf-8")) == {
+        "hooks": {PRE: [hooksite.hook_entry(COMMAND, PRE)]}
+    }
+    # Planned again over what is left: still named, still not taken out.
+    again = hooksite.plan_hook_restore(backup)
+    assert (again.events_found, again.left_in_place, again.changes) == ((), (PRE,), False)
+
+
+def test_a_full_wrap_leaves_nothing_in_place(site):
+    assert hooksite.plan_hook_restore(_wrap(site)).left_in_place == ()
+
+
 def test_the_unwrap_plan_names_every_event_it_takes_the_hook_out_of(site):
     step = hooksite.plan_hook_restore(_wrap(site))
     assert step.events_found == (PRE, POST)

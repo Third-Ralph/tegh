@@ -129,7 +129,9 @@ from tegh.posture import PostureLine
 #: disposable macOS runner on 2026-10-12 (Claude Code 2.1.295, recorded by cell
 #: in the reference's §4, "Managed settings, observed 2026-10-12") found a
 #: managed hook and the policy file holding against everything it tried from
-#: the user's side (c04, c05, c09, c11), and `docs/managed-profile.md` defines
+#: the user's side (c04, c05a to c05c, c09, c11b; for `--bare` only the
+#: matrix's prose, since its row c11a records no decider count), and
+#: `docs/managed-profile.md` defines
 #: the managed settings that carry the wrap's two entries. Two things keep the
 #: verdict `unknown` even so: tegh installs no managed settings and cannot read
 #: whether a machine has them, so this line cannot tell a managed project from
@@ -142,10 +144,10 @@ DURABILITY = PostureLine(
     "managed settings hold the hook entries in place, and tegh cannot yet tell "
     "whether this machine has them",
     holds="unknown",
-    source="docs/references/harnesses/claude-code.md:946-994, "
-    "docs/references/harnesses/claude-code.md:1051-1065, "
-    "docs/references/harnesses/claude-code.md:1168-1254, "
-    "docs/references/harnesses/claude-code.md:813-935 "
+    source="docs/references/harnesses/claude-code.md:948-996, "
+    "docs/references/harnesses/claude-code.md:1053-1067, "
+    "docs/references/harnesses/claude-code.md:1170-1256, "
+    "docs/references/harnesses/claude-code.md:813-937 "
     "(the vendor's permission-modes page for the first range; the second records a "
     "statement with no vendor source; the third is what was and was not run against a "
     "binary before 2026-10-12; the fourth is the managed-settings matrix, by cell); "
@@ -536,7 +538,7 @@ def gateway_entry(
     `launcher` is a full argv prefix rather than one executable because tegh is
     not always reachable as a console script — an editable checkout has no
     `tegh` on PATH, and the harness spawns stdio children with a minimal
-    environment, so `["<python>", "-P", "-m", "tegh.cli"]` is a real and
+    environment, so `["<python>", "-P", "-m", "tegh.entry"]` is a real and
     common form of the same command.
 
     `home` is written EXPLICITLY for the same reason the launcher is absolute:

@@ -41,8 +41,9 @@ dev = [
 ]
 
 [project.scripts]
-# The tegh product CLI: pin the MCP tools a coding project already uses.
-tegh = "tegh.cli:main"
+# The tegh product CLI: pin the MCP tools a coding project already uses. `tegh.entry`
+# routes `tegh hook` past `tegh.cli`, so the hook loads nothing from the base.
+tegh = "tegh.entry:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

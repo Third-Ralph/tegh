@@ -823,9 +823,11 @@ following is [observed, 2026-10-12], each with the cells it rests on.
 
 **With the decider down and no allow rule**, the call was refused in `default`, in `dontAsk` and
 with no mode flag (c01b, c01c, c01f): nothing approved it. In `auto` it ran, on haiku and on sonnet
-(c01d, c01g), the two mismatches of both runs. Only managed `permissions.disableAutoMode:
-"disable"` refused it there (c01e, c01h). With the decider up, the managed hook's allow was the
-only approval the call needed (c01a).
+(c01d, c01g), the two mismatches of both runs. Only a managed `"disableAutoMode": "disable"`, which
+the matrix wrote at the top level of the managed file, refused it there (c01e, c01h). The vendor's
+permissions page documents the key under `permissions` (`permissions.disableAutoMode`, above); that
+placement was not tested. With the decider up, the managed hook's allow was the only approval the
+call needed (c01a).
 
 **The mode locks.** Without a lock, `--dangerously-skip-permissions` ran the call (c03a). Under
 managed `permissions.disableBypassPermissionsMode: "disable"`, that flag, `--permission-mode

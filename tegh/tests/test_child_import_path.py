@@ -55,7 +55,7 @@ def _console_script() -> list[str]:
 
 def _module_launcher() -> list[str]:
     """tegh as `tegh_launcher` spells it where there is no console script."""
-    return launch.python_module_argv("tegh.cli")
+    return launch.python_module_argv("tegh.entry")
 
 
 @pytest.fixture
@@ -153,7 +153,7 @@ def test_every_python_child_is_started_through_the_one_helper(monkeypatch, tmp_p
     # The launcher form, which is what a harness config holds when there is no
     # console script beside the interpreter.
     monkeypatch.setattr(sys, "executable", str(tmp_path / "python"))
-    assert launch.tegh_launcher() == [str(tmp_path / "python"), "-P", "-m", "tegh.cli"]
+    assert launch.tegh_launcher() == [str(tmp_path / "python"), "-P", "-m", "tegh.entry"]
 
 
 def test_the_tape_reader_is_given_the_named_environment_and_nothing_else(

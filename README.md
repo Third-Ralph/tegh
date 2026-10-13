@@ -45,14 +45,20 @@ What the Claude Code row covers, and where it stops:
   the audit tape after it ran. tegh writes no allow rule, so the broker's answer is the only
   approval a built-in call gets from tegh's side, and a refusal or a hold reaches the agent in the
   broker's own words. A read outside the project, a web fetch or a web search taints the turn, so
-  the agent's next external write through the gateway is held for you. With the gateway down the
-  hook refuses the call, and if the hook itself fails, its `onFailure: "block"` setting refused the
-  call on Claude Code 2.1.295. The answer binds only where Claude Code runs the hook: `--bare`,
+  the agent's next external write through the gateway is held for you. On a tainted turn a shell
+  command, a web fetch and a file write or edit inside the project are still permitted, unless the
+  wrap named their class with `tegh wrap --hold-when-tainted <class>` (for example `shell`); a file
+  write or edit outside the project is held. With the gateway down the hook refuses the call, and
+  if the hook itself fails, its `onFailure: "block"` setting refused the call on Claude Code
+  2.1.295. The answer binds only where Claude Code runs the hook: `--bare`,
   `disableAllHooks` in a lower settings file or a removed entry leaves the call to Claude Code's own
   rules, and those ran calls with no approval at all in `auto` mode, the default for interactive
   sessions, and approve any call an allow rule you add names.
-  [`docs/managed-profile.md`](docs/managed-profile.md) defines managed settings that held against
-  each of those on a test runner, and says where that evidence stops; tegh does not install them.
+  [`docs/managed-profile.md`](docs/managed-profile.md) defines managed settings under which a
+  managed hook stayed in place on a test runner against a lower-scope `disableAllHooks` and an
+  unwritable policy file, with `--bare` recorded as a note rather than a predicted cell and a
+  managed command hook untested; it says where that evidence stops, and tegh does not install
+  them.
   Nothing contains a built-in call: a permitted one runs with your user's full
   reach. Every built-in call now runs `tegh hook` twice, before and after. `tegh wrap --no-hooks`
   leaves both hooks out.

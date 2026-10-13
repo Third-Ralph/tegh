@@ -26,11 +26,11 @@ person approves that intent the same call is permitted once (G36).
 
 Three rules, in this order (`pre_tool_use_output`):
 
-1. A tool the gateway serves (`GATEWAY_TOOL_PREFIX`) is allowed here and no
-   request is made. The broker decides that call when it arrives at the
-   gateway, and a second decision here would be a second decider. The `allow`
-   only tells the harness not to ask the person first: it is routing, and
-   grants nothing.
+1. A tool the gateway serves (`served_by_gateway`: the gateway's prefix and
+   the gateway's name in `mcp_server`) is allowed here and no request is
+   made. The broker decides that call when it arrives at the gateway, and a
+   second decision here would be a second decider. The `allow` only tells the
+   harness not to ask the person first: it is routing, and grants nothing.
 2. A tool listed in `HARNESS_INTERNAL_TOOLS` gets no output, so the harness's
    own permission rules apply to it.
 3. Everything else is asked about. An MCP tool the gateway does not serve is
@@ -56,10 +56,17 @@ default let the call proceed. The wrap's `PreToolUse` entry carries
 hook failure, a timeout included, in Claude Code 2.1.295 and later (documented
 on its hooks page for those versions; observed 2026-10-09 and 2026-10-12).
 
-One input is not answered that way: hook input that is not a JSON object
-cannot be told apart from a `PostToolUse` event, so it is handled as one (exit
-0, one `not recorded` line). Claude Code sends a JSON object for every event
-(reference §3, "Hook input").
+Two kinds of input are not answered that way, because neither can be told
+apart from a `PostToolUse` event. Input that does not parse as JSON, or parses
+to something other than an object, is handled as one: exit 0 and one `not
+recorded` line naming what was wrong. So is an object whose `hook_event_name`
+is missing or is neither `PreToolUse` nor `PostToolUse`, the only two events a
+wrap registers this command under: exit 0 and one line, `tegh hook: not
+recorded: unknown hook event`, so that a misspelled name or a command
+registered under some other event is not silent. Claude Code sends a JSON
+object naming its event for every event (reference §3, "Hook input"), so
+either one means the command was run by something else or registered where a
+wrap does not put it.
 
 What exit 2 and `onFailure` hold against is a decider that is down. The hook
 runs because the harness's settings name it, so whatever can change those
@@ -80,7 +87,7 @@ way an MCP read does.
 
 Three rules, in this order (`report_of`):
 
-1. A tool the gateway serves (`GATEWAY_TOOL_PREFIX`) is not reported. The broker
+1. A tool the gateway serves (`served_by_gateway`) is not reported. The broker
    decided that call and recorded it, and a second record would say it happened
    twice.
 2. A tool listed in `HARNESS_INTERNAL_TOOLS` is not reported. See the rule there
@@ -126,10 +133,15 @@ as canonical JSON (sorted keys, no spaces, non-ASCII kept).
 ## A thin client
 
 Standard library only, and nothing from the base: this runs twice per built-in
-tool call, so it loads no broker runtime and opens no store. It posts with
-`urllib`, with every proxy setting ignored and no redirect followed, because
-the mouth is on loopback and a proxy named in the environment, or a redirect
-to anywhere else, would otherwise be handed the launch token.
+tool call, so it loads no broker runtime and opens no store. Of tegh it imports
+`tegh.store` and, through it, `tegh.launch`, both standard library only. The
+command the wrap writes runs `tegh.entry` (the console script, or `python -P -m
+tegh.entry`), which routes `hook` here without importing `tegh.cli`: that
+module imports the base's schemas at its top, and pydantic, yaml and
+cryptography with them. It posts with `urllib`, with every proxy setting
+ignored and no redirect followed, because the mouth is on loopback and a proxy
+named in the environment, or a redirect to anywhere else, would otherwise be
+handed the launch token.
 """
 
 from __future__ import annotations
@@ -154,7 +166,7 @@ HARNESS_CODE = "claude-code"
 PRE_TOOL_USE = "PreToolUse"
 
 #: The hook event this command reports, after the call has run. An event that
-#: is neither is ignored.
+#: is neither is not recorded, with one line on stderr (`UNKNOWN_EVENT`).
 POST_TOOL_USE = "PostToolUse"
 
 #: The harness code for an MCP call that did not go through tegh's gateway. The
@@ -172,8 +184,9 @@ MCP_TOOL_PREFIX = "mcp__"
 #: not imported, because this process loads as little as it can.
 GATEWAY_SERVER_NAME = "tegh"
 
-#: Tools the gateway serves. Their calls are brokered there and recorded by the
-#: broker, so reporting one here would record it twice.
+#: The prefix of the tools the gateway serves. Their calls are brokered there
+#: and recorded by the broker, so reporting one here would record it twice. The
+#: prefix alone proves nothing about the server (`served_by_gateway`).
 GATEWAY_TOOL_PREFIX = f"{MCP_TOOL_PREFIX}{GATEWAY_SERVER_NAME}__"
 
 #: Claude Code tools that are not reported at all.
@@ -254,6 +267,10 @@ PREFIX = "tegh hook: not recorded: "
 
 #: The stderr line for a `PreToolUse` event that got no decision.
 DECIDE_PREFIX = "tegh hook: not decided: "
+
+#: The cause on the stderr line for an event named neither `PreToolUse` nor
+#: `PostToolUse`, or not named at all.
+UNKNOWN_EVENT = "unknown hook event"
 
 
 class HookFailure(Exception):
@@ -347,18 +364,26 @@ def locality(
 def served_by_gateway(event: Mapping[str, Any]) -> bool:
     """Whether the event's tool is one the project's gateway serves.
 
-    By the tool name's prefix. Where Claude Code also says which server the
-    tool came from (`mcp_server`, v2.1.274 or later; reference §3, "Hook
-    input"), that name has to agree, because a server named `tegh__x` would
-    otherwise wear the gateway's prefix and go unreported.
+    Only when the tool name carries the gateway's prefix AND the event's
+    `mcp_server` is an object whose `name` is the gateway's. The reference
+    (§3, "Hook input") says to base trust on `mcp_server` and never on the
+    `mcp__<server>__` prefix: a server named `tegh__x` wears the prefix, and an
+    event with `mcp_server` missing, `{}`, a string or a `null` name says
+    nothing about which server answered. Each of those is asked about and
+    reported as an MCP tool the gateway does not serve.
+
+    Claude Code sends `mcp_server` from v2.1.274. On an older Claude Code every
+    gateway call is therefore asked about here and reported once more as
+    `other` under `UNBROKERED_MCP_HARNESS_CODE`. That costs a record (and a hold
+    on a tainted turn, if the wrap named `other` with `--hold-when-tainted`)
+    and never grants authority: the broker still decides the call at the
+    gateway.
     """
     name = event.get("tool_name")
     if not isinstance(name, str) or not name.startswith(GATEWAY_TOOL_PREFIX):
         return False
     server = event.get("mcp_server")
-    if isinstance(server, Mapping) and isinstance(server.get("name"), str):
-        return server["name"] == GATEWAY_SERVER_NAME
-    return True
+    return isinstance(server, Mapping) and server.get("name") == GATEWAY_SERVER_NAME
 
 
 def _classified(name: str, tool_input: Any, *, project: Path, home: Path) -> dict[str, str]:
@@ -725,7 +750,8 @@ def hook_main(argv: Sequence[str], *, stdin=None) -> int:
     The event is read before the command line, because what a failure does
     depends on the event: `EXIT_NOT_DECIDED` for a `PreToolUse` event that got
     no decision, 0 for everything else (the module docstring says why). Input
-    that is not a JSON object is handled as a `PostToolUse` event's failure.
+    that is not a JSON object, and an object whose event name is missing or
+    unknown, is handled as a `PostToolUse` event's failure: one line, exit 0.
     """
     try:
         event = _read_event(stdin or sys.stdin)
@@ -740,4 +766,5 @@ def hook_main(argv: Sequence[str], *, stdin=None) -> int:
         return _pre_tool_use(argv, event)
     if name == POST_TOOL_USE:
         return _post_tool_use(argv, event)
+    print(f"{PREFIX}{UNKNOWN_EVENT}", file=sys.stderr)
     return 0

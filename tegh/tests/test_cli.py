@@ -230,6 +230,28 @@ class TestHarnessCoordinates:
         with pytest.raises(SystemExit):
             _parse_args(["wrap", "claude", "--project", "/proj", "--hold-when-tainted", "bash"])
 
+    def test_the_help_says_what_a_tainted_turn_permits_without_it(self, capsys) -> None:
+        """With no flag a tainted turn permits a shell command and a web fetch
+        (observed on a real tape), and holding Edit takes `file-edit`, not `file-write`."""
+        with pytest.raises(SystemExit):
+            _parse_args(["wrap", "--help"])
+        text = " ".join(capsys.readouterr().out.split())
+        assert (
+            "without it a tainted turn still permits a shell command, a web fetch and a "
+            "file write or edit inside the project"
+        ) in text
+        assert "'file-write' (Write) and 'file-edit' (Edit, MultiEdit, NotebookEdit)" in text
+
+    def test_the_readme_says_what_a_tainted_turn_permits_and_names_the_flag(self) -> None:
+        readme = Path(__file__).resolve().parents[2] / "README.md"
+        text = " ".join(readme.read_text(encoding="utf-8").split())
+        assert (
+            "On a tainted turn a shell command, a web fetch and a file write or edit inside "
+            "the project are still permitted, unless the wrap named their class with "
+            "`tegh wrap --hold-when-tainted <class>`"
+        ) in text
+        assert "a file write or edit outside the project is held" in text
+
 
 class TestHarnessSelection:
     def test_the_friendly_alias_resolves_to_the_frozen_catalog_value(self) -> None:

@@ -133,8 +133,10 @@ def tegh_launcher() -> list[str]:
 
     1. the installed console script, when it exists on disk beside this
        interpreter (the `pip install tegh` case), and
-    2. `<this interpreter> -P -m tegh.cli` otherwise, which is what an editable
-       checkout without the console script on disk has. `tegh` is a top-level
+    2. `<this interpreter> -P -m tegh.entry` otherwise, which is what an editable
+       checkout without the console script on disk has. `tegh.entry` is the
+       console script's own module, so both forms run `tegh hook` without
+       importing `tegh.cli` and the base behind it. `tegh` is a top-level
        package, so this form works wherever `tegh` is installed for that
        interpreter. It does not look for `tegh` in the directory the harness
        starts it in (`SAFE_PATH_FLAG`); the console script never did.
@@ -145,7 +147,7 @@ def tegh_launcher() -> list[str]:
     scripted = Path(sys.executable).with_name("tegh")
     if scripted.exists():
         return [str(scripted)]
-    return python_module_argv("tegh.cli")
+    return python_module_argv("tegh.entry")
 
 
 def gateway_argv(
@@ -243,8 +245,8 @@ def gateway_home_in(argv: Sequence[str], *, project: Path | str) -> Optional[str
     is on everything after the launcher, which is the part that says what the
     command does. The launcher is not compared, because it is the part that
     changes between two installs of tegh (a console script in one virtualenv,
-    `python -P -m tegh.cli` in another) and between two versions of it (0.1.1
-    wrote that form without the `-P`), and an entry written by any of them is
+    `python -P -m tegh.entry` in another) and between two versions of it (0.1.1
+    wrote `python -m tegh.cli`, and versions up to 0.3.0 `python -P -m tegh.cli`), and an entry written by any of them is
     still this project's gateway. Neither is the entry's name: a server of the user's
     own called `tegh` is not the gateway, and a renamed gateway still is.
 

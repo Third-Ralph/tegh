@@ -82,6 +82,13 @@ ON_FAILURE_BLOCK = "block"
 #: The key a settings file keeps its hooks under, by event.
 _HOOKS_KEY = "hooks"
 
+#: The top-level settings key that switches off every hook the file's scope
+#: runs. Set in the local settings file it stopped every project hook, tegh's
+#: `onFailure: "block"` entry included, and the call ran
+#: (`docs/references/harnesses/claude-code.md` §3, "Failure semantics", observed
+#: 2026-10-09).
+DISABLE_ALL_HOOKS_KEY = "disableAllHooks"
+
 #: How long the harness may wait for one `tegh hook` run, in seconds. The hook's
 #: own decision request gives up after five and its report after two, and a cold
 #: interpreter start is the rest.
@@ -220,34 +227,76 @@ def holds_command(site: HookSite, command: str) -> bool:
     return bool(events_holding(site, command))
 
 
-def commands_by_event(site: HookSite) -> dict[str, list[str]]:
-    """Every command hook string under each of the site's events, for a reader.
+def _read_leniently(site: HookSite) -> tuple[bool, Optional[dict[str, Any]]]:
+    """`(exists, document)` for a reader: the document is None when it is not an object.
 
     Read-only, so read leniently: the round-trip check guards a WRITE, and a
-    report of what the file holds needs only that it parses. Every event in
-    `site.events` is a key, holding `[]` when it has no command hook; an absent
-    file is `{}`. Raises `InterposeError` for a file that does not parse, and
-    OSError for one that cannot be read, so a caller can say "unknown".
+    report of what the file holds needs only that it parses. Raises
+    `InterposeError` for a file that does not parse, and OSError for one that
+    cannot be read, so a caller can say "unknown".
     """
     if not site.path.exists():
-        return {}
+        return False, None
     try:
         document = json.loads(site.path.read_text(encoding="utf-8"))
     except (ValueError, UnicodeDecodeError) as exc:
         raise InterposeError(f"{site.path} does not parse as JSON") from exc
-    if not isinstance(document, dict):
-        document = None
-    found: dict[str, list[str]] = {}
+    return True, document if isinstance(document, dict) else None
+
+
+def entries_by_event(site: HookSite) -> dict[str, list[dict[str, Any]]]:
+    """Every hook handler under each of the site's events, with its group's matcher.
+
+    Each item is `{"matcher": <the group's matcher>, "hook": <the handler
+    object, as the file holds it>}`. A group with no `matcher` key reads as
+    `""`, the value a wrap writes for every tool; any other value, `null`
+    included, is kept as the file holds it. Read and raised as
+    `commands_by_event` is: every event in `site.events` is a key, holding `[]`
+    when it has no handler, and an absent file is `{}`.
+    """
+    exists, document = _read_leniently(site)
+    if not exists:
+        return {}
+    found: dict[str, list[dict[str, Any]]] = {}
     for event in site.events:
-        commands = found.setdefault(event, [])
+        entries = found.setdefault(event, [])
         for group in _groups(document, event):
-            if isinstance(group, Mapping) and isinstance(group.get("hooks"), list):
-                commands.extend(
-                    hook["command"]
-                    for hook in group["hooks"]
-                    if isinstance(hook, Mapping) and isinstance(hook.get("command"), str)
-                )
+            if not isinstance(group, Mapping) or not isinstance(group.get("hooks"), list):
+                continue
+            matcher = group.get("matcher", "")
+            entries.extend(
+                {"matcher": matcher, "hook": dict(hook)}
+                for hook in group["hooks"]
+                if isinstance(hook, Mapping)
+            )
     return found
+
+
+def disables_all_hooks(site: HookSite) -> bool:
+    """Whether the site's file sets `disableAllHooks: true` at its top level.
+
+    Read and raised as `commands_by_event` is. An absent file is False.
+    """
+    _, document = _read_leniently(site)
+    return document is not None and document.get(DISABLE_ALL_HOOKS_KEY) is True
+
+
+def commands_by_event(site: HookSite) -> dict[str, list[str]]:
+    """Every command hook string under each of the site's events, for a reader.
+
+    Read leniently (`entries_by_event`). Every event in `site.events` is a
+    key, holding `[]` when it has no command hook; an absent file is `{}`.
+    Raises `InterposeError` for a file that does not parse, and OSError for one
+    that cannot be read, so a caller can say "unknown".
+    """
+    return {
+        event: [
+            entry["hook"]["command"]
+            for entry in entries
+            if isinstance(entry["hook"].get("command"), str)
+        ]
+        for event, entries in entries_by_event(site).items()
+    }
 
 
 def commands_at(site: HookSite) -> list[str]:
@@ -456,6 +505,12 @@ class HookRestore:
     removes_dir: bool
     #: Groups the wrap's entry was found inside beside other hooks, which stay.
     shared: bool = False
+    #: The events, of `HOOK_EVENTS`, that the wrap did not add to and under
+    #: which a group still runs the wrap's command. The unwrap never takes
+    #: those out, and says so: a backup written by 0.3.0 records `PostToolUse`
+    #: alone, so a `PreToolUse` entry added since by anything else stays, and
+    #: with the gateway gone it refuses every built-in call.
+    left_in_place: tuple[str, ...] = ()
 
     @property
     def found(self) -> bool:
@@ -533,12 +588,17 @@ def _lenient_holds(site: HookSite, command: str) -> bool:
 def plan_hook_restore(backup: HookBackup) -> HookRestore:
     """Compare the file with what the unwrap would leave. Reads, never writes.
 
+    `left_in_place` names each event the backup does not record as added to
+    under which the file still runs the wrap's command after the unwrap. Read
+    only to be said; nothing is taken out from under those events.
+
     A file that no longer round-trips (reformatted since the wrap, by hand or by
     the harness) is not rewritten. If tegh's hook is still in it, the unwrap
     refuses and says to take that one entry out by hand; once it is gone there
     is nothing left for tegh to do in the file, and the next unwrap goes on.
     """
     added = HookSite(path=backup.site.path, events=backup.added_events)
+    not_added = tuple(event for event in HOOK_EVENTS if event not in backup.added_events)
     try:
         loaded = _load(backup.site)
     except InterposeError:
@@ -551,7 +611,17 @@ def plan_hook_restore(backup: HookBackup) -> HookRestore:
                 f"Remove the {events} entries whose command is `{backup.command}` "
                 "by hand, then run `tegh unwrap` again."
             ) from None
-        return HookRestore(backup, events_found=(), removes_file=False, removes_dir=False)
+        try:
+            _, document = _read_leniently(backup.site)
+        except (InterposeError, OSError):
+            document = None
+        return HookRestore(
+            backup,
+            events_found=(),
+            removes_file=False,
+            removes_dir=False,
+            left_in_place=_events_holding(document, not_added, backup.command),
+        )
     if loaded.document is None:
         return HookRestore(backup, events_found=(), removes_file=False, removes_dir=False)
     target, found, shared = _without_command(loaded.document, backup)
@@ -562,6 +632,7 @@ def plan_hook_restore(backup: HookBackup) -> HookRestore:
         removes_file=removes_file,
         removes_dir=removes_file and not backup.dir_existed,
         shared=shared,
+        left_in_place=_events_holding(target, not_added, backup.command),
     )
 
 

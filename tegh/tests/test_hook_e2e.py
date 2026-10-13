@@ -186,15 +186,18 @@ def test_a_reported_built_in_read_holds_the_next_external_write(wrapped, capfd, 
     assert seen["resultDigest"] == expected["result_digest"]
 
 
-def _gateway_tool_name(harness: dict) -> str:
-    """The wrapped write tool as Claude Code names it, from the config the wrap wrote.
+def _gateway_call(harness: dict) -> dict:
+    """The wrapped write tool as Claude Code names it, and the `mcp_server` it sends.
 
-    The server name is read off disk and not assumed, so a wrap that named its
-    entry anything else would send this event past the hook's skip rule.
+    Both from the config the wrap wrote: the server name is read off disk and
+    not assumed, so a wrap that named its entry anything else would send this
+    event past the hook's skip rule. Claude Code 2.1.274 and later sends
+    `mcp_server` with an MCP tool's events, and the hook trusts that and not
+    the prefix (reference §3, "Hook input").
     """
     document = json.loads(harness["claude_json"].read_text(encoding="utf-8"))
     (server,) = document["projects"][str(harness["project"])]["mcpServers"]
-    return f"mcp__{server}__{WRITE_TOOL}"
+    return {"tool_name": f"mcp__{server}__{WRITE_TOOL}", "mcp_server": {"name": server}}
 
 
 def test_mcp_calls_on_the_tape_one_record_each_and_the_unbrokered_one_named(wrapped, capfd):
@@ -214,8 +217,9 @@ def test_mcp_calls_on_the_tape_one_record_each_and_the_unbrokered_one_named(wrap
     hook_command = _installed_hook_command(project)
     unbrokered = "mcp__plugin_notes_vault__read_note"
 
-    def replay(tool_name: str) -> None:
-        ran = _run_hook(hook_command, recorded_event(cwd=str(project), tool_name=tool_name), home)
+    def replay(tool_name: str, **fields) -> None:
+        event = recorded_event(cwd=str(project), tool_name=tool_name, **fields)
+        ran = _run_hook(hook_command, event, home)
         assert (ran.returncode, ran.stdout, ran.stderr) == (0, "", "")
 
     client = GatewayClient(command, env=harness_spawn_env(), timeout=120)
@@ -223,7 +227,7 @@ def test_mcp_calls_on_the_tape_one_record_each_and_the_unbrokered_one_named(wrap
         client.initialize(client_name="tegh-hook-e2e")
         _wait_for_address(store.event_mouth_addr_path(project), client)
         first = client.call_tool(WRITE_TOOL, WRITE_ARGS)
-        replay(_gateway_tool_name(wrapped))
+        replay(**_gateway_call(wrapped))
         replay("ToolSearch")
         replay(unbrokered)
         second = client.call_tool(WRITE_TOOL, WRITE_ARGS)
@@ -304,6 +308,87 @@ def test_status_and_diff_say_whether_built_in_calls_are_observed(harness, capsys
     site.path.write_text("{}\n", encoding="utf-8")
     main(["status", "--project", str(harness["project"])])
     assert "built-in tools: NOT observed" in capsys.readouterr().out
+
+
+def _built_ins_posture(project: Path, capsys) -> dict:
+    """The built-ins line of `tegh posture --json` for `project`."""
+    capsys.readouterr()
+    assert main(["posture", "--json", "--project", str(project)]) == 0
+    report = json.loads(capsys.readouterr().out)
+    (line,) = [line for line in report["gaps"] if "built-in tools" in line["claim"]]
+    return line
+
+
+def _pre_matches_read(settings: dict) -> None:
+    settings["hooks"][hook.PRE_TOOL_USE][0]["matcher"] = "Read"
+
+
+def _pre_without_on_failure(settings: dict) -> None:
+    del settings["hooks"][hook.PRE_TOOL_USE][0]["hooks"][0]["onFailure"]
+
+
+def _hooks_switched_off(settings: dict) -> None:
+    settings["disableAllHooks"] = True
+
+
+@pytest.mark.parametrize(
+    ("edit", "status_says", "posture_says"),
+    [
+        pytest.param(
+            _pre_matches_read,
+            "tegh's PreToolUse entry is there but has the matcher `\"Read\"`",
+            "has the matcher `\"Read\"`",
+            id="PreToolUse matcher Read",
+        ),
+        pytest.param(
+            _pre_without_on_failure,
+            'tegh\'s PreToolUse entry is there but carries no `onFailure: "block"`',
+            'carries no `onFailure: "block"`',
+            id="PreToolUse without onFailure",
+        ),
+        pytest.param(
+            _hooks_switched_off,
+            "sets `disableAllHooks: true`, which switches its own hooks off",
+            "sets `disableAllHooks: true`",
+            id="disableAllHooks in the same file",
+        ),
+    ],
+)
+def test_status_diff_and_posture_read_the_entries_and_not_only_the_command(
+    harness, capsys, edit, status_says, posture_says
+):
+    """An entry that runs tegh's command is not MEDIATED in any shape at all.
+
+    A matcher that names one tool leaves every other call unasked; a
+    PreToolUse entry without `onFailure: "block"` lets a failed run through;
+    and `disableAllHooks` in the same file means neither entry runs. Each one,
+    made by hand to a real wrap's settings file, takes MEDIATED away from all
+    three readers and says what differs.
+    """
+    assert main(["init"]) == 0
+    assert main(
+        [
+            "wrap", "claude", "--project", str(harness["project"]),
+            "--harness-home", str(harness["home"]), "--admit-all",
+        ]
+    ) == 0
+    site = claude_code.hook_site(harness["project"])
+    settings = json.loads(site.path.read_text(encoding="utf-8"))
+    edit(settings)
+    site.path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    capsys.readouterr()
+
+    for command in ("status", "diff"):
+        main([command, "--project", str(harness["project"])])
+        out = capsys.readouterr().out
+        assert "built-in tools: MEDIATED" not in out, (command, out)
+        assert status_says in out, (command, out)
+        assert str(site.path) in out, (command, out)
+
+    line = _built_ins_posture(harness["project"], capsys)
+    assert line["holds"] == "no", line
+    assert "MEDIATED" not in line["claim"], line
+    assert posture_says in line["detail"], line
 
 
 # ---------------------------------------------------------------------------

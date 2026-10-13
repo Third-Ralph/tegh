@@ -31,7 +31,7 @@ import pytest
 
 pytest.importorskip("mcp", reason="a real wrap snapshots a real MCP server")
 
-from tegh import interpose, unwrap  # noqa: E402
+from tegh import hooksite, interpose, unwrap  # noqa: E402
 from tegh.harnesses import claude_code  # noqa: E402
 from tegh.store import TeghStore, TeghStoreError  # noqa: E402
 from tegh.tests.wrapping import LEDGER_FIELD as _FIELD  # noqa: E402
@@ -381,6 +381,50 @@ def test_the_plan_and_the_report_agree_and_name_no_file_that_never_existed(
     ]
     named = set(re.findall(r"(/\S+?)(?:\s|$)", "\n".join(what for _, what in reported)))
     assert named and named <= existed, named - existed
+
+
+def test_a_pre_entry_a_0_3_0_backup_does_not_record_is_kept_and_named(wrapped, capsys) -> None:
+    """The backup says PostToolUse alone, the file holds both of tegh's entries.
+
+    The unwrap takes out the PostToolUse entry it records, keeps the
+    PreToolUse one, and says on its own line, in the plan and in the report,
+    that the entry stays and will refuse every built-in call until removed by
+    hand.
+    """
+    store, project = wrapped["store"], wrapped["project"]
+    backup_path = store.backup_path(project)
+    data = json.loads(backup_path.read_text(encoding="utf-8"))
+    record = data["hook"]
+    data["hook"] = {
+        "path": record["path"],
+        "command": record["command"],
+        "event": "PostToolUse",
+        "event_existed": False,
+        "added": True,
+        "file_existed": record["file_existed"],
+        "hooks_existed": record["hooks_existed"],
+        "dir_existed": record["dir_existed"],
+    }
+    backup_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    site = claude_code.hook_site(project)
+    assert set(json.loads(site.path.read_text(encoding="utf-8"))["hooks"]) == {
+        "PreToolUse",
+        "PostToolUse",
+    }
+
+    assert _unwrap(wrapped, "--yes") == 0
+    out = capsys.readouterr().out
+    kept = (
+        f"{site.label}  (tegh's PreToolUse hook entry, left in place because this wrap "
+        "did not add it; with the gateway gone it will refuse every built-in call until "
+        "it is removed by hand)"
+    )
+    plan_text, report_text = out.split("It leaves untouched:")
+    assert re.search(rf"^  keep +{re.escape(kept)}$", plan_text, re.M), plan_text
+    assert re.search(rf"^  kept +{re.escape(kept)}$", report_text, re.M), report_text
+    assert json.loads(site.path.read_text(encoding="utf-8"))["hooks"] == {
+        "PreToolUse": [hooksite.hook_entry(record["command"], "PreToolUse")]
+    }
 
 
 _NOTES = {"notes": {"command": "notes-server"}}

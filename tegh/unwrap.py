@@ -34,8 +34,11 @@ The hooks a wrap added to the harness's settings come out the same way
 events the backup says the wrap added to (`PreToolUse` and `PostToolUse`, or
 `PostToolUse` alone for a wrap by 0.3.0), and the settings file and its
 directory when the wrap created them and nothing else is left in them. A hook
-added since is kept. A backup written before tegh added a hook records none,
-and its unwrap has none to take out.
+added since is kept. An entry running tegh's hook command under an event the
+wrap did not add to is kept too, and the plan says so on a line of its own,
+because once the gateway is gone a `PreToolUse` one refuses every built-in call
+until someone removes it. A backup written before tegh added a hook records
+none, and its unwrap has none to take out.
 
 ## The credential ends in exactly one place, and never in none
 
@@ -198,6 +201,13 @@ class UnwrapPlan:
                     f"{label}  (tegh's {events} hook {entries}{beside})",
                 )
             )
+        # A tegh entry under an event the wrap did not add to stays, and the
+        # line says what it will do once the gateway is gone.
+        if self.hook is not None:
+            actions.extend(
+                Action("keep", "kept", _left_in_place(self.hook.site.label, event))
+                for event in self.hook.left_in_place
+            )
         if self.hook is not None and self.hook.removes_file:
             actions.append(
                 Action(
@@ -246,6 +256,19 @@ class UnwrapPlan:
             Action("remove", "removed", f"tegh's wrap backup at {self.backup_path}")
         )
         return actions
+
+
+def _left_in_place(label: str, event: str) -> str:
+    """The line for a tegh hook entry the unwrap leaves under `event`, in the file `label` names."""
+    after = (
+        "with the gateway gone it will refuse every built-in call"
+        if event == hooksite.PRE_TOOL_USE
+        else "with the gateway gone it records nothing"
+    )
+    return (
+        f"{label}  (tegh's {event} hook entry, left in place because this wrap did "
+        f"not add it; {after} until it is removed by hand)"
+    )
 
 
 def _credential_name(credential: RelocatedReference) -> str:

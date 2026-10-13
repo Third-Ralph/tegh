@@ -46,6 +46,18 @@ REFUSED_TEXT = (
 #: A tool the wrapped gateway serves, as Claude Code names it.
 GATEWAY_TOOL = "mcp__tegh__ledger__get_entry"
 
+#: What Claude Code 2.1.274 and later sends beside a call to the gateway's tool.
+GATEWAY_SERVER = {"name": "tegh", "source": "local"}
+
+#: `mcp_server` values that say nothing about which server answered, each with
+#: the gateway's tool name: absent, empty, not an object, and a `null` name.
+MALFORMED_SERVERS = [
+    pytest.param({}, id="mcp_server absent"),
+    pytest.param({"mcp_server": {}}, id="mcp_server {}"),
+    pytest.param({"mcp_server": "evil"}, id="mcp_server a string"),
+    pytest.param({"mcp_server": {"name": None}}, id="mcp_server name null"),
+]
+
 
 def recorded_event(**changes) -> dict:
     event = json.loads(EVENT_FIXTURE.read_text(encoding="utf-8"))
@@ -183,9 +195,8 @@ def test_the_result_digest_is_over_canonical_json():
         pytest.param(recorded_event(hook_event_name="PreToolUse"), id="PreToolUse"),
         pytest.param(recorded_event(hook_event_name="PostToolUseFailure"), id="failure"),
         pytest.param(recorded_event(hook_event_name="SessionStart"), id="other event"),
-        pytest.param(recorded_event(tool_name=GATEWAY_TOOL), id="gateway tool"),
         pytest.param(
-            recorded_event(tool_name=GATEWAY_TOOL, mcp_server={"name": "tegh", "source": "local"}),
+            recorded_event(tool_name=GATEWAY_TOOL, mcp_server=GATEWAY_SERVER),
             id="gateway tool, server named",
         ),
         pytest.param(recorded_event(tool_name="ToolSearch"), id="harness-internal tool"),
@@ -197,7 +208,11 @@ def test_events_that_are_not_reported(places, event):
 
 
 def test_the_gateway_prefix_is_the_name_a_wrap_gives_the_gateway():
-    """The skip rule is a rule about one server name, so it must be the wrap's."""
+    """The skip rule is a rule about one server name, so it must be the wrap's.
+
+    And the name in the tool's prefix is not enough: the event's `mcp_server`
+    has to name the gateway too (reference §3, "Hook input").
+    """
     from tegh import interpose
 
     assert hook.GATEWAY_SERVER_NAME == interpose._UNRECORDED_GATEWAY_NAME
@@ -205,6 +220,23 @@ def test_the_gateway_prefix_is_the_name_a_wrap_gives_the_gateway():
         "gateway_name"
     ].default
     assert hook.GATEWAY_TOOL_PREFIX == "mcp__tegh__"
+    assert hook.served_by_gateway({"tool_name": GATEWAY_TOOL, "mcp_server": GATEWAY_SERVER})
+    assert not hook.served_by_gateway({"tool_name": GATEWAY_TOOL})
+
+
+@pytest.mark.parametrize("server", MALFORMED_SERVERS)
+def test_a_gateway_name_without_the_gateway_server_is_reported_as_unbrokered(places, server):
+    """The prefix alone never makes a call the gateway's: it is on the tape as `other`."""
+    event = recorded_event(tool_name=GATEWAY_TOOL)
+    event.pop("mcp_server", None)
+    event.update(server)
+    assert not hook.served_by_gateway(event)
+    report = hook.report_of(event, project=places["project"], home=places["home"])
+    assert (report["harness"], report["tool_class"], report["subject_digest"]) == (
+        "claude-code-mcp",
+        "other",
+        _sha(GATEWAY_TOOL),
+    )
 
 
 @pytest.mark.parametrize(
@@ -481,9 +513,7 @@ def test_a_bad_invocation_is_one_line_and_exit_0(wired, capsys, argv, stdin):
 @pytest.mark.parametrize(
     "event",
     [
-        recorded_event(hook_event_name="SessionStart"),
-        recorded_event(hook_event_name="PostToolUseFailure"),
-        recorded_event(tool_name=GATEWAY_TOOL),
+        recorded_event(tool_name=GATEWAY_TOOL, mcp_server=GATEWAY_SERVER),
         recorded_event(tool_name="ToolSearch"),
     ],
 )
@@ -494,9 +524,36 @@ def test_an_ignored_event_posts_nothing_and_says_nothing(wired, capsys, event):
     assert mouth.requests == []
 
 
-def test_an_event_that_is_neither_pre_nor_post_is_silent_even_with_a_bad_command_line(capsys):
+def _without_event_name(event: dict) -> dict:
+    del event["hook_event_name"]
+    return event
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        pytest.param(_without_event_name(pre_event()), id="no event name"),
+        pytest.param(pre_event(hook_event_name="PreToolUSE"), id="misspelled"),
+        pytest.param(pre_event(hook_event_name=7), id="not a string"),
+        pytest.param(recorded_event(hook_event_name="SessionStart"), id="another event"),
+        pytest.param(recorded_event(hook_event_name="PostToolUseFailure"), id="failure event"),
+    ],
+)
+def test_an_unknown_hook_event_is_one_line_posts_nothing_and_exits_0(wired, capsys, event):
+    """Claude Code always names its event, so an object that does not is not silent."""
+    with _Mouth(body=_answer("refuse", text="must not be asked")) as mouth:
+        wired["listen"](f"127.0.0.1:{mouth.port}")
+        assert _run(wired["argv"], event, capsys) == (
+            0,
+            "",
+            f"{hook.PREFIX}{hook.UNKNOWN_EVENT}\n",
+        )
+    assert mouth.requests == []
+
+
+def test_an_event_that_is_neither_pre_nor_post_is_one_line_even_with_a_bad_command_line(capsys):
     event = recorded_event(hook_event_name="Stop")
-    assert _run(["--bogus"], event, capsys) == (0, "", "")
+    assert _run(["--bogus"], event, capsys) == (0, "", f"{hook.PREFIX}{hook.UNKNOWN_EVENT}\n")
 
 
 @pytest.mark.parametrize(
@@ -651,13 +708,13 @@ def test_a_permit_prints_allow_whatever_else_the_answer_carries(wired, capsys):
 @pytest.mark.parametrize(
     "event",
     [
-        pytest.param(pre_event(tool_name=GATEWAY_TOOL), id="gateway tool"),
         pytest.param(
-            pre_event(tool_name=GATEWAY_TOOL, mcp_server={"name": "tegh", "source": "local"}),
+            pre_event(tool_name=GATEWAY_TOOL, mcp_server=GATEWAY_SERVER),
             id="gateway tool, server named",
         ),
         pytest.param(
-            pre_event(tool_name=GATEWAY_TOOL, tool_use_id=None), id="gateway tool, no call id"
+            pre_event(tool_name=GATEWAY_TOOL, mcp_server=GATEWAY_SERVER, tool_use_id=None),
+            id="gateway tool, no call id",
         ),
     ],
 )
@@ -668,6 +725,24 @@ def test_a_tool_the_gateway_serves_is_allowed_without_asking(wired, capsys, even
         wired["listen"](f"127.0.0.1:{mouth.port}")
         assert _run(wired["argv"], event, capsys) == (0, hook.allow_output() + "\n", "")
     assert mouth.requests == []
+
+
+@pytest.mark.parametrize("server", MALFORMED_SERVERS)
+def test_a_gateway_name_without_the_gateway_server_is_asked_about(wired, capsys, server):
+    """The prefix alone never earns the routing `allow`: the broker is asked, as for
+    any MCP tool the gateway does not serve."""
+    event = pre_event(tool_name=GATEWAY_TOOL)
+    event.update(server)
+    with _Mouth(body=REFUSE) as mouth:
+        wired["listen"](f"127.0.0.1:{mouth.port}")
+        assert _run(wired["argv"], event, capsys) == (0, hook.deny_output(REFUSED_TEXT) + "\n", "")
+    (request,) = mouth.requests
+    body = json.loads(request["body"])
+    assert (body["harness"], body["tool_class"], body["locality"]) == (
+        "claude-code-mcp",
+        "other",
+        "unknown",
+    )
 
 
 def test_a_server_wearing_the_gateway_prefix_is_asked_about(wired, capsys):
@@ -822,6 +897,61 @@ def test_tegh_hook_loads_nothing_from_the_platform():
         [sys.executable, "-c", probe], capture_output=True, text=True, check=True
     )
     assert done.stdout.strip() == "[]"
+
+
+#: Top-level packages the hook's own run must not import. `tegh.cli` imports
+#: every one of them through the base's schemas.
+_HEAVY_PACKAGES = frozenset({"safe_agents", "pydantic", "yaml", "cryptography"})
+
+
+def _imported(importtime_stderr: str) -> set[str]:
+    """The top-level package of every module `-X importtime` says was imported."""
+    return {
+        line.rsplit("|", 1)[-1].strip().split(".")[0]
+        for line in importtime_stderr.splitlines()
+        if line.startswith("import time:") and "|" in line
+    }
+
+
+def test_the_console_script_runs_the_hook_without_loading_the_platform(tmp_path):
+    """The command a wrap writes runs `tegh.entry`, and `tegh hook` there imports no base.
+
+    The console script and the launcher form both name `tegh.entry`, so this
+    runs that module the way the launcher does, on a `PreToolUse` event with no
+    gateway, under `-X importtime`. Before `tegh.entry` the console script was
+    `tegh.cli:main`, whose imports load 21 `safe_agents` modules on every call.
+    """
+    import tomllib
+
+    scripts = tomllib.loads((Path(__file__).parents[2] / "pyproject.toml").read_text())
+    assert scripts["project"]["scripts"]["tegh"] == "tegh.entry:main"
+    project, home = tmp_path / "project", tmp_path / "tegh"
+    project.mkdir()
+    done = subprocess.run(  # noqa: S603 - fixed argv, no shell
+        [
+            sys.executable, "-X", "importtime", "-m", "tegh.entry",
+            "hook", "--project", str(project), "--home", str(home),
+        ],
+        input=json.dumps(pre_event()),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert done.returncode == hook.EXIT_NOT_DECIDED, done.stderr[-2000:]
+    assert done.stdout == ""
+    imported = _imported(done.stderr)
+    assert "tegh" in imported, "the importtime trace was not read"
+    assert not imported & _HEAVY_PACKAGES, sorted(imported & _HEAVY_PACKAGES)
+
+
+def test_the_entry_runs_every_other_subcommand_through_the_cli(capsys):
+    """Off the hook path `tegh.entry` is `tegh.cli`'s `main`, status included."""
+    from tegh import entry
+
+    with pytest.raises(SystemExit) as exited:
+        entry.main(["--version-of-nothing"])
+    assert exited.value.code == 2
+    assert "usage: tegh" in capsys.readouterr().err
 
 
 def test_mouth_is_listening_answers_from_a_connect(wired):

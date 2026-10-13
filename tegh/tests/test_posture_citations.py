@@ -185,7 +185,11 @@ _NO_MANIFEST = _NoManifest()
 #: Every reading of a project's hook entries, so each built-ins line is read.
 _HOOK_READINGS = tuple(
     HookReading(pre, post) for pre in (True, False) for post in (True, False)
-) + (HookReading(None, None),)
+) + (
+    HookReading(None, None),
+    HookReading(False, True, differs=("tegh's PreToolUse entry is there but x",)),
+    HookReading(False, False, disabled=True),
+)
 
 #: One of each state `_routing` can report, so every branch's citations are read.
 _ROUTINGS = (

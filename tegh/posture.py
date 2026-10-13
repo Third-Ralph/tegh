@@ -72,7 +72,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Literal, Optional
 
@@ -533,7 +533,9 @@ _BUILT_INS_SOURCE = (
     "tegh/tests/test_hook_e2e.py::"
     "test_mcp_calls_on_the_tape_one_record_each_and_the_unbrokered_one_named; "
     "docs/references/harnesses/claude-code.md:490-543 (onFailure, documented and observed); "
-    "docs/references/harnesses/claude-code.md:813-935 (managed settings, observed "
+    "docs/references/harnesses/claude-code.md:1214-1243 (hooks a lower scope or a flag "
+    "switches off, observed 2026-10-09); "
+    "docs/references/harnesses/claude-code.md:813-937 (managed settings, observed "
     "2026-10-12, by cell); docs/managed-profile.md; "
     "broker/GATEWAY.md (known limits: built-in tools are observed, and decided when "
     "asked); wjatx/ptc-gal-reference#192"
@@ -555,15 +557,20 @@ _MEDIATION_LIMITS = (
     "the call. If the hook fails some other way, the PreToolUse entry's "
     "`onFailure: \"block\"` refused the call when the decider was down and when "
     "it hung past the timeout (c08b, c08d), where without it the call ran (c08a, "
-    "c08c); this report reads that both entries are present and does not read "
-    "that key. Both act only on a hook that runs. A hook the harness does not run "
-    "leaves the call to Claude Code's own rules: outside managed settings, "
-    "`--bare`, CLAUDE_CODE_SIMPLE=1 and `disableAllHooks` in a lower settings "
-    "file each switched project hooks off without a word (observed 2026-10-09), "
-    "and anything that can write the settings file can remove an entry. Those "
-    "rules refuse a call with no allow rule in `default`, `dontAsk` and with no "
-    "mode flag (c01b, c01c, c01f); in `acceptEdits` a file write ran (observed "
-    "2026-10-09); in `auto`, the starting mode for interactive "
+    "c08c); this report counts the PreToolUse entry only when it carries that "
+    "key and matches every tool. Both act only on a hook that runs. A hook the "
+    "harness does not run leaves the call to Claude Code's own rules: outside "
+    "managed settings, `--bare`, CLAUDE_CODE_SIMPLE=1 and `disableAllHooks` in "
+    "the local settings file each switched project hooks off without a word, "
+    "and the call ran (observed 2026-10-09; "
+    "docs/references/harnesses/claude-code.md §3, \"Failure semantics\", lines "
+    "537-542, and \"Behaviour observed since\", 2026-10-09 items 3 and 5, lines "
+    "1236-1243), and anything that can write the settings file can remove an "
+    "entry. With a hook that runs and a decider that is down, those rules "
+    "refused a call with no allow rule in `default`, `dontAsk` and with no mode "
+    "flag (c01b, c01c, c01f; in the second run c01f's model followed the refusal "
+    "with a read-only `echo`, which ran); in `acceptEdits` a file write ran "
+    "(observed 2026-10-09); in `auto`, the starting mode for interactive "
     "sessions, the call ran (c01d, c01g) unless managed settings set "
     "`disableAutoMode` (c01e, c01h); any allow rule the user adds approves it "
     "unless managed settings set `allowManagedPermissionRulesOnly` (c02); and "
@@ -573,11 +580,18 @@ _MEDIATION_LIMITS = (
     "the hook does not decide it the broker loses sight of it (observed "
     "2026-10-09; c01f and c03c in the second run). A mod the user installs can "
     "approve a call a hook outside managed settings refused (documented, not "
-    "tested). docs/managed-profile.md defines the managed settings that hold the "
-    "hooks in place against each of these (c04, c05, c09, c11); tegh installs "
-    "none and cannot yet read whether a machine has them. A session whose hooks "
-    "never run leaves nothing on the tape, so tegh cannot yet report a session "
-    "that never called home (wjatx/ptc-gal-reference#192)"
+    "tested). docs/managed-profile.md defines managed settings that held the "
+    "matrix's managed hook in place against a project or user hook under "
+    "`allowManagedHooksOnly` (c04), `disableAllHooks` in the project file, the "
+    "local file and `--settings` (c05a to c05c), the runner's own user writing "
+    "the policy file (c09) and `--safe-mode` (c11b); for `--bare` the matrix's "
+    "prose says the same, and its row (c11a) is INFO with no decider count; no "
+    "cell tested CLAUDE_CODE_SIMPLE=1. The matrix's managed hook was an HTTP "
+    "hook and the profile carries a command hook, which was not tested. tegh "
+    "installs none of it and cannot yet read whether a machine has them. A "
+    "session whose hooks never run leaves nothing on the tape, so tegh cannot "
+    "yet report a session that never called home "
+    "(wjatx/ptc-gal-reference#192)"
 )
 
 #: What the PostToolUse report adds when it is the only hook.
@@ -605,12 +619,23 @@ _BUILT_INS_SUBJECT = "The agent's built-in tools (shell, file reads and writes, 
 class HookReading:
     """Which of tegh's two hook entries this project's harness settings run.
 
-    Each is True, False, or None when the settings could not be read. The two
-    are read from one file, so they are None together.
+    `pre` and `post` are True, False, or None when the settings could not be
+    read. The two are read from one file, so they are None together. An entry
+    counts only in the shape that matters to it (`_hooks_installed`); one that
+    is in the file and does not count is said in `differs`, and `disabled` says
+    the file switches every hook in it off.
     """
 
     pre: Optional[bool]
     post: Optional[bool]
+    #: One phrase per tegh entry that is in the file and does not count,
+    #: saying what differs from what a wrap writes.
+    differs: tuple[str, ...] = ()
+    #: The file holds a tegh entry and sets `disableAllHooks: true`, so neither
+    #: entry runs.
+    disabled: bool = False
+    #: The settings file read, for a line that names it. Not compared.
+    path: Optional[Path] = field(default=None, compare=False)
 
 
 #: A project with neither entry, the reading when nothing was read.
@@ -638,6 +663,39 @@ def _built_ins_line(hooks: HookReading = NO_HOOKS) -> PostureLine:
             detail="the harness settings that would carry tegh's PreToolUse and "
             "PostToolUse hooks could not be read. " + _NOT_CONTAINED,
         )
+    where = f"{hooks.path}" if hooks.path is not None else "the harness settings file"
+    if hooks.disabled:
+        return PostureLine(
+            claim=f"{_BUILT_INS_SUBJECT} are NOT observed and not mediated: the file "
+            "holding tegh's hooks switches its own hooks off, and they are not "
+            "contained",
+            holds="no",
+            source=_BUILT_INS_SOURCE,
+            detail=f"{where} holds tegh's hook entries and sets `disableAllHooks: "
+            "true`, so Claude Code runs none of the hooks in it, and a built-in call "
+            "reaches neither the broker nor the tape. A hook that never runs cannot "
+            "fail, so `onFailure: \"block\"` does not act either (observed "
+            "2026-10-09, docs/references/harnesses/claude-code.md §3, \"Failure "
+            "semantics\"). Remove the key to restore both entries. " + _NOT_CONTAINED,
+        )
+    if hooks.differs:
+        asks = (
+            "The PreToolUse entry as written still asks the broker before each call. "
+            if hooks.pre
+            else ""
+        )
+        return PostureLine(
+            claim=f"{_BUILT_INS_SUBJECT}: tegh's hook entries are present but "
+            "altered, so they do not reach every call as a wrap leaves them, and "
+            "they are not contained",
+            holds="no",
+            source=_BUILT_INS_SOURCE,
+            detail=f"in {where}, " + "; ".join(hooks.differs) + ". This report counts "
+            "a PreToolUse entry only when its matcher is `\"\"` or absent and it "
+            "carries `onFailure: \"block\"`, and a PostToolUse entry only when its "
+            "matcher is `\"\"` or absent. " + asks + "Unwrap and wrap again to write "
+            "both entries as a wrap writes them. " + _NOT_CONTAINED,
+        )
     if hooks.pre and hooks.post:
         return PostureLine(
             claim=f"{_BUILT_INS_SUBJECT} are MEDIATED by the broker, and not "
@@ -652,7 +710,12 @@ def _built_ins_line(hooks: HookReading = NO_HOOKS) -> PostureLine:
             "the agent as the broker's own sentence, and a held call is released "
             "with `tegh approve`. A permitted read outside the project, a web fetch "
             "or a web search taints the turn at the permit, before it runs; a read "
-            "inside the project is trusted. After the call the PostToolUse hook "
+            "inside the project is trusted. On a tainted turn a shell command, a web "
+            "fetch and a file write or edit inside the project are permitted unless "
+            "the wrap named their class with `--hold-when-tainted` (the envelope's "
+            "`tainted_harness_hold`, empty unless named); a file write or edit "
+            "outside the project is held by the standing tainted-external-write "
+            "rule. After the call the PostToolUse hook "
             "reports it, and the report pairs with the decision on the tape. "
             + _CLASSIFIED
             + ". "
@@ -699,33 +762,96 @@ def _built_ins_line(hooks: HookReading = NO_HOOKS) -> PostureLine:
     )
 
 
+def _shown(value: object) -> str:
+    """A settings value as it would be written in the file, in backticks."""
+    return f"`{json.dumps(value, ensure_ascii=False)}`"
+
+
+def _what_differs(event: str, entry: dict) -> str:
+    """One phrase saying how tegh's entry under `event` differs from what a wrap writes."""
+    from tegh.hooksite import ON_FAILURE_BLOCK, PRE_TOOL_USE  # noqa: PLC0415
+
+    parts = []
+    if entry["matcher"] != "":
+        parts.append(
+            f"has the matcher {_shown(entry['matcher'])}, where a wrap writes `\"\"` "
+            "to match every tool"
+        )
+    if event == PRE_TOOL_USE and entry["hook"].get("onFailure") != ON_FAILURE_BLOCK:
+        if "onFailure" in entry["hook"]:
+            parts.append(
+                f"carries `onFailure: {json.dumps(entry['hook']['onFailure'])}` and not "
+                "`\"block\"`"
+            )
+        else:
+            parts.append('carries no `onFailure: "block"`')
+    return f"tegh's {event} entry is there but " + ", and it ".join(parts)
+
+
 def _hooks_installed(project: Path, harness: Harness) -> HookReading:
     """Which of tegh's hook entries this project's harness settings run.
 
-    An entry counts when it runs `tegh hook` for THIS project, the reading
-    `tegh unwrap` uses (`launch.hook_home_in`). No hook site means neither;
-    settings that cannot be read mean unknown for both. Unlike `_routing`,
-    "unknown" is safe to say here, so it is said rather than rounded down.
+    An entry is tegh's when it runs `tegh hook` for THIS project, the reading
+    `tegh unwrap` uses (`launch.hook_home_in`). It COUNTS only in the shape the
+    claim rests on: a PreToolUse entry whose matcher is `""` or absent (every
+    tool) and whose handler carries `onFailure: "block"`, and a PostToolUse
+    entry whose matcher is `""` or absent. `timeout` is not read. A tegh entry
+    that is there and does not count is named in `differs`, and if the file
+    sets `disableAllHooks: true` neither counts (`disabled`). A matcher such as
+    `"*"` is read as not counting, which can only understate.
+
+    No hook site means neither; settings that cannot be read mean unknown for
+    both. Unlike `_routing`, "unknown" is safe to say here, so it is said
+    rather than rounded down.
     """
+    from tegh.hooksite import (  # noqa: PLC0415
+        ON_FAILURE_BLOCK,
+        POST_TOOL_USE,
+        PRE_TOOL_USE,
+        disables_all_hooks,
+        entries_by_event,
+    )
+    from tegh.launch import hook_home_in  # noqa: PLC0415
+
     try:
         from tegh.harnesses import hook_config_site  # noqa: PLC0415
-        from tegh.hooksite import commands_by_event  # noqa: PLC0415
-        from tegh.launch import hook_home_in  # noqa: PLC0415
 
         site = hook_config_site(harness, project)
-        if site is None:
-            return NO_HOOKS
-        by_event = commands_by_event(site)
     except Exception:  # noqa: BLE001 — any failure means "not known"
         return HookReading(pre=None, post=None)
+    if site is None:
+        return NO_HOOKS
+    try:
+        by_event = entries_by_event(site)
+        disabled = disables_all_hooks(site)
+    except Exception:  # noqa: BLE001 — any failure means "not known"
+        return HookReading(pre=None, post=None, path=site.path)
 
-    def runs_tegh(event: str) -> bool:
-        return any(
-            hook_home_in(command, project=project) is not None
-            for command in by_event.get(event, ())
+    def tegh_entries(event: str) -> list[dict]:
+        return [
+            entry
+            for entry in by_event.get(event, ())
+            if isinstance(entry["hook"].get("command"), str)
+            and hook_home_in(entry["hook"]["command"], project=project) is not None
+        ]
+
+    pre_entries, post_entries = tegh_entries(PRE_TOOL_USE), tegh_entries(POST_TOOL_USE)
+    if disabled and (pre_entries or post_entries):
+        return HookReading(pre=False, post=False, disabled=True, path=site.path)
+    pre = any(
+        entry["matcher"] == "" and entry["hook"].get("onFailure") == ON_FAILURE_BLOCK
+        for entry in pre_entries
+    )
+    post = any(entry["matcher"] == "" for entry in post_entries)
+    differs = tuple(
+        _what_differs(event, entries[0])
+        for event, entries, counted in (
+            (PRE_TOOL_USE, pre_entries, pre),
+            (POST_TOOL_USE, post_entries, post),
         )
-
-    return HookReading(pre=runs_tegh("PreToolUse"), post=runs_tegh("PostToolUse"))
+        if entries and not counted
+    )
+    return HookReading(pre=pre, post=post, differs=differs, path=site.path)
 
 
 def _invariant_gaps(

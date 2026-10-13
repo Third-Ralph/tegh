@@ -79,7 +79,6 @@ from tegh.launch import (
     BROKER_INHERITED_ENV_VARS,
     DEFAULT_CALL_TIMEOUT_SECONDS,
     gateway_home_in,
-    hook_home_in,
     inherited_env,
     python_module_argv,
     tegh_launcher,
@@ -100,7 +99,7 @@ from tegh.lockfile import (
     read_lock,
     write_lock,
 )
-from tegh.posture import build_report, render, to_dict
+from tegh.posture import _hooks_installed, build_report, render, to_dict
 from tegh.review import (
     compute_tool_delta,
     render_ack_requirements,
@@ -2419,30 +2418,36 @@ def _built_in_tools_line(project: Path) -> str:
     """Whether this project's built-in tool calls are asked about and reported, read off the disk.
 
     Read from the harness's settings, as `_is_interposed` reads its config: the
-    question is what the harness would run. Three readings, as `tegh posture`
-    makes them (`posture._built_ins_line`): MEDIATED needs both of tegh's
-    entries, the `PreToolUse` one that asks the broker before each call and the
-    `PostToolUse` one that reports it after. No answer calls them contained,
-    because nothing tegh installs contains them.
+    question is what the harness would run. The readings are `tegh posture`'s
+    (`posture._hooks_installed`, `posture._built_ins_line`): MEDIATED needs both
+    of tegh's entries, the `PreToolUse` one that asks the broker before each
+    call and the `PostToolUse` one that reports it after, each in the shape it
+    counts in. An entry that is there in another shape, or a file that switches
+    its own hooks off, is said as such. No answer calls them contained, because
+    nothing tegh installs contains them.
     """
     site = hook_config_site(Harness.CLAUDE_CODE, project)
     if site is None:
         return "built-in tools: NOT observed, not mediated and not contained"
-    try:
-        by_event = hooksite.commands_by_event(site)
-    except (interpose.InterposeError, OSError):
+    hooks = _hooks_installed(project, Harness.CLAUDE_CODE)
+    if hooks.pre is None or hooks.post is None:
         return (
             f"built-in tools: UNKNOWN whether tegh's hooks reach them ({site.path} "
             "could not be read); not contained either way"
         )
-
-    def runs_tegh(event: str) -> bool:
-        return any(
-            hook_home_in(command, project=project) is not None
-            for command in by_event.get(event, ())
+    if hooks.disabled:
+        return (
+            "built-in tools: NOT observed, not mediated and not contained: "
+            f"{site.path} holds tegh's hooks and sets `disableAllHooks: true`, which "
+            "switches its own hooks off; remove the key to restore them"
         )
-
-    pre, post = runs_tegh("PreToolUse"), runs_tegh("PostToolUse")
+    if hooks.differs:
+        return (
+            "built-in tools: tegh's hooks ALTERED, not mediated as a wrap leaves "
+            f"them, not contained: in {site.path}, " + "; ".join(hooks.differs)
+            + "; unwrap and wrap again to restore both entries"
+        )
+    pre, post = hooks.pre, hooks.post
     if pre and post:
         return (
             "built-in tools: MEDIATED, not contained: tegh's PreToolUse hook in "
@@ -2708,8 +2713,11 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help=(
             "hold a built-in call of this class for approval when the turn is "
             "tainted, as the envelope's tainted_harness_hold. Repeatable; one of "
-            f"{', '.join(HARNESS_TOOL_CLASSES)}. Off unless given. 'shell' is the "
-            "one most consumers want"
+            f"{', '.join(HARNESS_TOOL_CLASSES)}. Off unless given: without it a "
+            "tainted turn still permits a shell command, a web fetch and a file "
+            "write or edit inside the project. 'file-write' (Write) and "
+            "'file-edit' (Edit, MultiEdit, NotebookEdit) are separate classes, so "
+            "holding both takes both. 'shell' is the one most consumers want"
         ),
     )
 
