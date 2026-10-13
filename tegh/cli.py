@@ -2583,13 +2583,19 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     # these flags are documentation; `hook.py` parses its own.
     hook = sub.add_parser(
         "hook",
-        help="report one Claude Code PostToolUse event to the gateway (what the hook runs)",
+        help=(
+            "carry one Claude Code PreToolUse or PostToolUse event to the gateway "
+            "(what the hook runs)"
+        ),
         description=(
-            "Read ONE Claude Code PostToolUse hook event on stdin, classify the "
-            "built-in tool call it describes, and report the classification and "
-            "digests to this project's running gateway. It observes and gates "
-            "nothing: it always exits 0 and prints nothing on stdout, and when the "
-            "report cannot be made it says so in one line on stderr."
+            "Read ONE Claude Code hook event on stdin and classify the tool call it "
+            "describes. On PreToolUse, ask this project's running gateway for the "
+            "broker's decision and relay it: allow on a permit, deny with the "
+            "broker's own text on a refuse. When no decision can be had it prints "
+            "nothing on stdout, says why in one line on stderr, and exits 2, which "
+            "blocks the call. On PostToolUse, report the classification and digests "
+            "to the gateway: it always exits 0 and prints nothing on stdout, and "
+            "when the report cannot be made it says so in one line on stderr."
         ),
     )
     with_project(hook)
@@ -2724,9 +2730,11 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[list[str]] = None) -> int:
     words = sys.argv[1:] if argv is None else list(argv)
     if words[:1] == ["hook"]:
-        # Before argparse, which answers a malformed command line with exit 2:
-        # for a `PostToolUse` hook that puts its stderr in front of the model.
-        # `tegh hook` parses its own two flags and always exits 0 (`hook.py`).
+        # Before argparse, which answers a malformed command line with exit 2
+        # whatever the event: for a `PostToolUse` hook that puts its stderr in
+        # front of the model. `tegh hook` parses its own two flags and chooses
+        # its own status (`hook.py`): 2 for a `PreToolUse` event it got no
+        # decision for, 0 otherwise. Passed through as it is.
         return hook_main(words[1:])
     args = _parse_args(words)
     try:
